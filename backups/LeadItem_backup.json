@@ -1,0 +1,26 @@
+[
+  {
+    "id": "7b878bd9-6c11-4778-bab9-b3b8fa292585",
+    "name": "name",
+    "description": "it will ask for user name",
+    "createdAt": "2025-07-21T09:08:09.569Z",
+    "updatedAt": "2025-07-21T09:08:09.569Z",
+    "agentId": "ed5edc6e-c58a-4104-a2c8-ed02e9300cfc"
+  },
+  {
+    "id": "46c93de4-3695-4d78-9684-f9abca2004d5",
+    "name": "age",
+    "description": "it will ask for user age",
+    "createdAt": "2025-07-21T09:08:21.421Z",
+    "updatedAt": "2025-07-21T09:08:21.421Z",
+    "agentId": "ed5edc6e-c58a-4104-a2c8-ed02e9300cfc"
+  },
+  {
+    "id": "617a47d5-51da-4906-afc6-c8a641d41a7b",
+    "name": "amount",
+    "description": "it will ask for amount",
+    "createdAt": "2025-07-21T09:08:39.229Z",
+    "updatedAt": "2025-07-21T09:08:39.229Z",
+    "agentId": "ed5edc6e-c58a-4104-a2c8-ed02e9300cfc"
+  }
+]

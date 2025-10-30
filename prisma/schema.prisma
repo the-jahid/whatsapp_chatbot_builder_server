@@ -1,0 +1,643 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/* ================================
+ * MODELS
+ * ================================ */
+
+model User {
+  id                  String               @id @default(uuid())
+  email               String               @unique
+  oauthId             String               @unique
+  username            String?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  agents              Agent[]
+  calendarConnections CalendarConnection[]
+}
+
+model Agent {
+  id                          String                    @id @default(uuid())
+  name                        String
+  prompt                      String?
+  apiKey                      String?                   @unique
+  isActive                    Boolean                   @default(false)
+  isLeadsActive               Boolean                   @default(false)
+  isEmailActive               Boolean                   @default(false)
+
+  // NEW feature flags
+  isVoiceResponseAvailable    Boolean                   @default(false)
+  isImageDataExtraction       Boolean                   @default(false)
+
+  createdAt                   DateTime                  @default(now())
+  updatedAt                   DateTime                  @updatedAt
+  userId                      String
+  memoryType                  MemoryType                @default(BUFFER)
+  isKnowledgebaseActive       Boolean                   @default(false)
+  isBookingActive             Boolean                   @default(false)
+  claudeModel                 ClaudeModel?
+  geminiModel                 GeminiModel?
+  modelType                   AIModel                   @default(CHATGPT)
+  openAIModel                 OpenAIModel?
+  useOwnApiKey                Boolean                   @default(false)
+  userProvidedApiKey          String?
+  historyLimit                Int                       @default(20)
+
+  user                        User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  calendarAssignments         AgentCalendarAssignment[]
+  appointments                Appointment[]
+  appointmentLeadItems        AppointmentLeadItem[]
+  bookingSettings             BookingSettings?
+  conversations               Conversation[]
+  Email                       Email[]
+  knowledgeBase               KnowledgeBase?
+  leads                       Lead[]
+  leadItems                   LeadItem[]
+  weeklyAvailabilities        WeeklyAvailability[]
+  whatsapp                    Whatsapp?
+
+  // Agent-owned reusable templates
+  templates                   Template[]
+
+  // One Agent -> many OutboundCampaign
+  OutboundCampaign            OutboundCampaign[]
+
+  @@index([userId, isActive])
+}
+
+model Whatsapp {
+  id           String   @id @default(uuid())
+  whatsappJid  String?
+  whatsappName String?
+  sessionData  Json
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  agentId      String   @unique
+  agent        Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+}
+
+/**
+ * OutboundCampaign belongs to an Agent and has children:
+ * - OutboundLead[]
+ * - leadCustomFieldInatake[]
+ * - templates (M:N implicit)
+ */
+model OutboundCampaign {
+  id        String                 @id @default(uuid())
+  name      String
+  status    OutboundCampaignStatus @default(DRAFT)
+  createdAt DateTime               @default(now())
+  updatedAt DateTime               @updatedAt
+
+  // Many-to-one: Campaign -> Agent
+  agentId   String
+  agent     Agent                  @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  // Back-relations
+  outboundLeads           OutboundLead[]
+  leadCustomFieldIntakes  leadCustomFieldInatake[]
+  templates               Template[]            // implicit M:N
+
+  // 1:1 Broadcast settings for WhatsApp bulk sending
+  broadcast               Broadcast?
+
+  @@index([createdAt])
+  @@index([agentId, status, createdAt])
+  @@map("outboundCampaigns")
+}
+
+/**
+ * Agent-level reusable template.
+ * Stores optional media binary directly in Postgres.
+ */
+model Template {
+  id            String            @id @default(uuid())
+  name          String
+  body          String            @default("Hello world")
+
+  /// Variable keys/placeholders like ["firstName","date"]
+  variables     String[]          @default([])
+
+  // Single media (stored in Postgres)
+  mediaType     TemplateMediaType @default(NONE)   // NONE, IMAGE, VIDEO, DOCUMENT
+  mediaData     Bytes?
+  mediaMimeType String?
+  mediaFileName String?
+  mediaSize     Int?
+  mediaWidth    Int?
+  mediaHeight   Int?
+  mediaChecksum String?
+
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  // Ownership
+  agentId       String
+  agent         Agent             @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  // Implicit M:N usage in campaigns (no extra fields)
+  campaigns     OutboundCampaign[]
+
+  @@unique([agentId, name])
+  @@index([agentId, createdAt])
+  @@index([mediaType])
+  @@map("templates")
+}
+
+model leadCustomFieldInatake {
+  id                 String           @id @default(uuid())
+  name               String
+  outboundCampaignId String
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  outboundCampaign   OutboundCampaign @relation(fields: [outboundCampaignId], references: [id], onDelete: Cascade)
+
+  @@unique([outboundCampaignId, name])
+  @@index([outboundCampaignId])
+  @@map("lead_custom_field_inatake")
+}
+
+model OutboundLead {
+  id                 String             @id @default(uuid())
+  phoneNumber        String
+  firstName          String?
+  timeZone           String             @default("UTC")
+  status             OutboundLeadStatus @default(QUEUED)
+  attemptsMade       Int                @default(0)
+  maxAttempts        Int                @default(3)
+  lastAttemptAt      DateTime?
+  outboundCampaignId String
+  customFields       Json?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  outboundCampaign   OutboundCampaign   @relation(fields: [outboundCampaignId], references: [id], onDelete: Cascade)
+
+  @@index([createdAt])
+  @@index([status])
+  @@index([phoneNumber])
+  @@index([outboundCampaignId, status, createdAt])
+  @@map("outbound_leads")
+}
+
+/* ---------------------- Knowledgebase (Pinecone) ---------------------- */
+/**
+ * Each Agent has exactly one KnowledgeBase.
+ * Pinecone namespace MUST be the Agent.id (enforced in application code).
+ * Defaults align with your .env:
+ *   EMBEDDING_MODEL=text-embedding-3-large
+ *   EMBEDDING_DIMENSIONS=3072
+ */
+model KnowledgeBase {
+  id                   String                  @id @default(uuid())
+  freeText             String?
+  companyName          String?
+  companyDescription   String?
+  createdAt            DateTime                @default(now())
+  updatedAt            DateTime                @updatedAt
+  agentId              String                  @unique
+  agent                Agent                   @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  /** Default embedding settings for this KB (can be overridden per document if needed) */
+  embeddingModel       String                  @default("text-embedding-3-large")
+  embeddingDimensions  Int                     @default(3072)
+
+  documents            KnowledgeBaseDocument[]
+}
+
+/**
+ * Represents a logical document or text item stored for an Agent’s KB.
+ * - For FILE sources, the raw file appears in UI; text is extracted and chunked.
+ * - For TEXT sources, free text pasted by user.
+ * - All vectors are upserted to Pinecone under namespace = Agent.id.
+ */
+model KnowledgeBaseDocument {
+  id                String                 @id @default(uuid())
+  title             String
+  /** Raw or extracted text (optional for FILE; useful for previews/search fallback) */
+  content           String?
+  tags              String[]               @default([])
+
+  /** Source and lifecycle */
+  sourceType        KnowledgeSourceType    @default(TEXT)
+  status            KnowledgeItemStatus    @default(PROCESSING)
+  deletedAt         DateTime?
+
+  /** File metadata (only when sourceType = FILE) */
+  fileName          String?
+  fileExt           String?
+  mimeType          String?
+  fileSize          Int?
+  checksum          String?                // e.g., SHA256 of bytes
+  storagePath       String?                // e.g., S3/local path if you store originals
+
+  /** Pinecone mapping */
+  // IMPORTANT: vectorNamespace must equal the owning Agent.id (set in code)
+  vectorNamespace   String
+  vectorIdPrefix    String                 @unique // prefix used to create chunk vector IDs
+  vectorCount       Int                    @default(0)
+  lastUpsertedAt    DateTime?
+
+  /** Chunking/embedding settings (persisted for reproducibility) */
+  embeddingModel    String                 @default("text-embedding-3-large")
+  embeddingDimensions Int                  @default(3072)
+  chunkSize         Int                    @default(800)
+  chunkOverlap      Int                    @default(200)
+  tokenCount        Int?
+
+  /** Extra metadata (original URL, author, etc.) */
+  metadata          Json?
+
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+
+  knowledgeBaseId   String
+  knowledgeBase     KnowledgeBase          @relation(fields: [knowledgeBaseId], references: [id], onDelete: Cascade)
+
+  @@index([knowledgeBaseId, createdAt])
+  @@index([sourceType, status, createdAt])
+  @@index([vectorNamespace])
+  @@map("knowledge_base_documents")
+}
+
+model BookingSettings {
+  id                  String   @id @default(uuid())
+  appointmentSlot     Int      @default(15)
+  allowSameDayBooking Boolean  @default(true)
+  enableNotifications Boolean  @default(true)
+  notificationEmails  String[]
+  agentId             String   @unique
+  timezone            String   @default("UTC")
+  agent               Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+}
+
+model CalendarConnection {
+  id                   String                    @id @default(uuid())
+  provider             CalendarProvider
+  accountEmail         String
+  refreshToken         String?
+  isPrimary            Boolean                   @default(false)
+  createdAt            DateTime                  @default(now())
+  updatedAt            DateTime                  @default(now())
+  accessToken          String?
+  accessTokenExpiresAt DateTime?
+  calendarId           String?
+  userId               String
+  agentAssignments     AgentCalendarAssignment[]
+  user                 User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, accountEmail])
+  @@index([userId, isPrimary])
+}
+
+model AgentCalendarAssignment {
+  agentId              String
+  calendarConnectionId String
+  assignedAt           DateTime           @default(now())
+  agent                Agent              @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  calendarConnection   CalendarConnection @relation(fields: [calendarConnectionId], references: [id], onDelete: Cascade)
+
+  @@id([agentId, calendarConnectionId])
+}
+
+model WeeklyAvailability {
+  id        String    @id @default(uuid())
+  dayOfWeek DayOfWeek
+  startTime String
+  endTime   String
+  agentId   String
+  agent     Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, dayOfWeek, startTime, endTime])
+}
+
+model Appointment {
+  id        String            @id @default(uuid())
+  startTime DateTime
+  endTime   DateTime
+  status    AppointmentStatus @default(PENDING)
+  location  String?
+  notes     String?
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+  agentId   String
+  timezone  String            @default("UTC")
+  agent     Agent             @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([agentId, startTime])
+}
+
+model AppointmentLeadItem {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  agentId     String
+  agent       Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, name])
+  @@index([agentId, createdAt])
+}
+
+model LeadItem {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  agentId     String
+  agent       Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, name])
+}
+
+model Lead {
+  id        String     @id @default(uuid())
+  status    LeadStatus @default(NEW)
+  source    String?
+  data      Json
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  agentId   String
+  agent     Agent      @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([agentId, status, createdAt])
+}
+
+model Conversation {
+  id         String     @id @default(uuid())
+  senderJid  String
+  message    String
+  senderType SenderType
+  createdAt  DateTime   @default(now())
+  agentId    String
+  metadata   Json?
+  agent      Agent      @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([agentId, senderJid, createdAt])
+}
+
+model Email {
+  id                String      @id @default(uuid())
+  recipient         String
+  subject           String
+  body              String
+  sentAt            DateTime    @default(now())
+  agentId           String
+  status            EmailStatus @default(SENT)
+  clickedAt         DateTime?
+  lastError         String?
+  openedAt          DateTime?
+  providerMessageId String?
+  agent             Agent       @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([agentId, sentAt])
+  @@index([status])
+}
+
+model Broadcast {
+  id                   String            @id @default(uuid())
+
+  // 1:1 to OutboundCampaign
+  outboundCampaignId   String            @unique
+  outboundCampaign     OutboundCampaign  @relation(fields: [outboundCampaignId], references: [id], onDelete: Cascade)
+
+  // Core controls
+  isEnabled            Boolean           @default(false)
+  isPaused             Boolean           @default(false)
+  startAt              DateTime?
+
+  // Gap between messages (seconds). Default: 2 minutes.
+  messageGapSeconds    Int               @default(120)
+
+  // Template to send (many broadcasts can use same template)
+  selectedTemplateId   String?
+
+  // Progress / metrics
+  totalQueued          Int               @default(0)
+  totalSent            Int               @default(0)
+  totalFailed          Int               @default(0)
+
+  status               BroadcastStatus   @default(DRAFT)
+
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+
+  @@index([outboundCampaignId])
+  @@index([selectedTemplateId])
+  @@map("broadcasts")
+}
+
+/* ================================
+ * ENUMS
+ * ================================ */
+
+enum AIModel {
+  CHATGPT
+  GEMINI
+  CLAUDE
+}
+
+enum OpenAIModel {
+  gpt_3_5_turbo
+  gpt_4
+  gpt_4_1
+  gpt_4_1_mini
+  gpt_4_1_nano
+  gpt_5
+  gpt_5_mini
+  gpt_5_nano
+  gpt_5_thinking
+  gpt_5_thinking_mini
+  gpt_5_thinking_nano
+  gpt_5_thinking_pro
+  gpt_4_turbo
+  gpt_4_turbo_16k
+  gpt_4_turbo_32k
+  gpt_4_vision
+  gpt_4_vision_16k
+  gpt_5_turbo
+  gpt_5_turbo_16k
+  gpt_5_turbo_32k
+  gpt_5_vision
+}
+
+enum GeminiModel {
+  gemini_1_0_nano_1
+  gemini_1_0_nano_2
+  gemini_1_0_pro
+  gemini_1_0_ultra
+  gemini_1_5_pro
+  gemini_1_5_flash
+  gemini_2_0_flash
+  gemini_2_0_flash_lite
+  gemini_2_0_flash_preview_image_generation
+  gemini_2_0_flash_live_001
+  gemini_2_5_pro
+  gemini_2_5_flash
+  gemini_2_5_flash_lite
+}
+
+enum ClaudeModel {
+  claude_3_haiku
+  claude_3_sonnet
+  claude_3_opus
+  claude_3_5_haiku
+  claude_3_5_sonnet
+  claude_3_5_sonnet_v2
+  claude_3_7_sonnet
+  claude_3_7_sonnet_thinking
+  claude_4_opus
+  claude_4_opus_4_1
+  claude_4_sonnet
+}
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  QUALIFIED
+  UNQUALIFIED
+  WON
+  LOST
+}
+
+enum SenderType {
+  HUMAN
+  AI
+}
+
+enum MemoryType {
+  NONE
+  BUFFER
+  SUMMARY
+  KNOWLEDGE_BASE
+}
+
+enum EmailStatus {
+  SENT
+  DELIVERED
+  OPENED
+  FAILED
+}
+
+enum CalendarProvider {
+  GOOGLE
+  OUTLOOK
+}
+
+enum DayOfWeek {
+  SUNDAY
+  MONDAY
+  TUESDAY
+  WEDNESDAY
+  THURSDAY
+  FRIDAY
+  SATURDAY
+}
+
+enum AppointmentStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+}
+
+enum OutboundCampaignType {
+  SINGLE
+  BROADCAST
+}
+
+enum OutboundCampaignStatus {
+  DRAFT
+  SCHEDULED
+  RUNNING
+  COMPLETED
+  CANCELLED
+}
+
+/** SUPERTSET kept for compatibility */
+enum OutboundLeadStatus {
+  QUEUED
+  NEED_RETRY
+  MESSAGE_SUCCESSFUL
+  COMPLETED
+  FAILED
+  INVALID_NUMBER
+  BLOCKED
+  UNSUBSCRIBED
+  DNC
+  IN_PROGRESS
+  ANSWERED
+  PAUSED
+}
+
+enum OutboundMessageStatus {
+  QUEUED
+  SENT
+  SERVER_ACK
+  DELIVERED
+  READ
+  FAILED
+  CANCELLED
+}
+
+enum OutboundMessageEventType {
+  QUEUED
+  SENT
+  SERVER_ACK
+  DELIVERED
+  READ
+  FAILED
+  CANCELLED
+}
+
+enum RecipientProgressStatus {
+  ACTIVE
+  COMPLETED
+  STOPPED
+}
+
+/** WhatsApp template lifecycle (currently unused by Template) */
+enum TemplateStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+enum TemplateMediaType {
+  NONE
+  IMAGE
+  VIDEO
+  DOCUMENT
+}
+
+enum BroadcastStatus {
+  DRAFT
+  READY
+  RUNNING
+  PAUSED
+  COMPLETED
+  CANCELLED
+}
+
+/** New: Knowledgebase source & status enums */
+enum KnowledgeSourceType {
+  TEXT
+  FILE
+  URL
+}
+
+enum KnowledgeItemStatus {
+  PROCESSING
+  ACTIVE
+  FAILED
+  DELETED
+}

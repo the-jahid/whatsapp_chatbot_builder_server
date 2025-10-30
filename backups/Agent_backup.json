@@ -1,0 +1,16 @@
+[
+  {
+    "id": "ed5edc6e-c58a-4104-a2c8-ed02e9300cfc",
+    "name": "My First Test Agent",
+    "prompt": "You are a friendly and helpful sales assistant. Your goal is to answer questions and capture leads.",
+    "apiKey": null,
+    "isActive": true,
+    "isLeadsActive": true,
+    "isEmailActive": true,
+    "isKnowledgebaseActive": true,
+    "memoryType": "BUFFER",
+    "createdAt": "2025-07-17T11:03:14.468Z",
+    "updatedAt": "2025-08-08T06:39:52.756Z",
+    "userId": "92241b07-63d2-4bff-a9cd-8665cbf56a9e"
+  }
+]

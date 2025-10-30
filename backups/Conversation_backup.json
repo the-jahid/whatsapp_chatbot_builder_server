@@ -1,0 +1,50 @@
+[
+  {
+    "id": "f574b810-096b-45ce-833a-2bda1cd1a107",
+    "senderJid": "8801701750469@s.whatsapp.net",
+    "message": "hello",
+    "senderType": "HUMAN",
+    "createdAt": "2025-08-07T07:02:20.636Z",
+    "agentId": "ed5edc6e-c58a-4104-a2c8-ed02e9300cfc"
+  },
+  {
+    "id": "d25ac604-ac5d-4f0e-8441-7c13e94f3f97",
+    "senderJid": "8801701750469@s.whatsapp.net",
+    "message": "Hi there! How can I assist you today?",
+    "senderType": "AI",
+    "createdAt": "2025-08-07T07:02:21.788Z",
+    "agentId": "ed5edc6e-c58a-4104-a2c8-ed02e9300cfc"
+  },
+  {
+    "id": "bab97f08-fe6f-4262-b77b-aa1a20388921",
+    "senderJid": "8801701750469@s.whatsapp.net",
+    "message": "Ok",
+    "senderType": "HUMAN",
+    "createdAt": "2025-08-07T14:14:01.561Z",
+    "agentId": "ed5edc6e-c58a-4104-a2c8-ed02e9300cfc"
+  },
+  {
+    "id": "d2de33d2-47e4-4d27-afb7-50801886e322",
+    "senderJid": "8801701750469@s.whatsapp.net",
+    "message": "Is there anything specific you need help with today? Feel free to ask!",
+    "senderType": "AI",
+    "createdAt": "2025-08-07T14:14:03.519Z",
+    "agentId": "ed5edc6e-c58a-4104-a2c8-ed02e9300cfc"
+  },
+  {
+    "id": "4ac653ee-e3fe-4ae3-80a7-936a189c082a",
+    "senderJid": "8801701750469@s.whatsapp.net",
+    "message": "hey",
+    "senderType": "HUMAN",
+    "createdAt": "2025-08-08T03:41:47.861Z",
+    "agentId": "ed5edc6e-c58a-4104-a2c8-ed02e9300cfc"
+  },
+  {
+    "id": "92f02629-b6f9-4bc2-9a46-41b16a79e397",
+    "senderJid": "8801701750469@s.whatsapp.net",
+    "message": "Hello again! How can I help you today?",
+    "senderType": "AI",
+    "createdAt": "2025-08-08T03:41:49.771Z",
+    "agentId": "ed5edc6e-c58a-4104-a2c8-ed02e9300cfc"
+  }
+]
