@@ -40,7 +40,7 @@ model Agent {
   userId                      String
   memoryType                  MemoryType                @default(BUFFER)
   isKnowledgebaseActive       Boolean                   @default(false)
-  isBookingActive             Boolean                   @default(false)
+  isBookingActive             Boolean                   @default(true)
   claudeModel                 ClaudeModel?
   geminiModel                 GeminiModel?
   modelType                   AIModel                   @default(CHATGPT)

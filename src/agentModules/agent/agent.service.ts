@@ -1,10 +1,12 @@
 // ===================================================
-// src/agent/agent.service.ts
+// src/agent/agent.service.ts  (FIXED)
 // Plain CRUD + filters. User scoping is passed in by controller.
 // Enforces unique name per user (case-insensitive).
 // Adds default prompt on create and when prompt is cleared on update.
 // Chat(): provider-agnostic LLM call with BUFFER memory using historyLimit.
 // Also exposes helpers to fetch provider/model enum options dynamically.
+// Accepts string/boolean for flags, including isBookingActive / isKnowledgebaseActive.
+// Maps apiKey -> userProvidedApiKey on create & update.
 // ===================================================
 import {
   Injectable,
@@ -26,6 +28,7 @@ import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 import { CreateAgentDto, UpdateAgentDto } from './dto/agent.dto';
 import { PrismaService } from 'src/prisma/prisma.service';
 
+// ---------- Types ----------
 export interface PaginatedAgentsResult {
   data: Agent[];
   total: number;
@@ -39,7 +42,7 @@ type AgentSortableFields =
   | 'id'
   | 'name'
   | 'prompt'
-  | 'apiKey' // legacy
+  | 'apiKey' // legacy search
   | 'isActive'
   | 'memoryType'
   | 'isLeadsActive'
@@ -52,8 +55,8 @@ type AgentSortableFields =
   | 'openAIModel'
   | 'geminiModel'
   | 'claudeModel'
-  | 'isVoiceResponseAvailable'   // NEW
-  | 'isImageDataExtraction'      // NEW
+  | 'isVoiceResponseAvailable'
+  | 'isImageDataExtraction'
   | 'createdAt'
   | 'updatedAt';
 
@@ -105,6 +108,7 @@ export interface GetAllAgentsQuery {
   updatedAtTo?: string;
 }
 
+// ---------- Constants ----------
 const AGENT_SORTABLE_FIELDS = new Set<AgentSortableFields>([
   'id',
   'name',
@@ -122,8 +126,8 @@ const AGENT_SORTABLE_FIELDS = new Set<AgentSortableFields>([
   'openAIModel',
   'geminiModel',
   'claudeModel',
-  'isVoiceResponseAvailable', // NEW
-  'isImageDataExtraction',    // NEW
+  'isVoiceResponseAvailable',
+  'isImageDataExtraction',
   'createdAt',
   'updatedAt',
 ]);
@@ -147,6 +151,7 @@ Guidelines:
 - Never invent private data or unverifiable facts.`;
 }
 
+// ---------- Normalizers ----------
 function normalizeMemoryType(mt?: string | MemoryType): MemoryType | undefined {
   if (!mt) return undefined;
   const v = String(mt).trim().toUpperCase();
@@ -159,6 +164,19 @@ function normalizeEnum<T extends string>(
   if (!raw) return undefined;
   const v = String(raw).trim();
   return set.has(v) ? (v as T) : undefined;
+}
+function coerceBool(v: unknown): boolean | undefined {
+  if (v === null || v === undefined) return undefined;
+  if (typeof v === 'boolean') return v;
+  const s = String(v).trim().toLowerCase();
+  if (s === 'true' || s === '1') return true;
+  if (s === 'false' || s === '0') return false;
+  return undefined;
+}
+function coerceInt(v: unknown): number | undefined {
+  if (v === null || v === undefined) return undefined;
+  const n = Number.parseInt(String(v), 10);
+  return Number.isNaN(n) ? undefined : n;
 }
 
 // ---------- Model mappers (adjust if your enum values differ from vendor IDs) ----------
@@ -220,7 +238,6 @@ async function callAnthropicChat(opts: {
   temperature: number;
   history?: ChatHistoryItem[];
 }): Promise<string> {
-  // Build messages array in Anthropic shape
   const messages: Array<{ role: 'user' | 'assistant'; content: Array<{ type: 'text'; text: string }> }> = [];
   for (const h of opts.history ?? []) {
     messages.push({
@@ -265,7 +282,6 @@ async function callGeminiChat(opts: {
   temperature: number;
   history?: ChatHistoryItem[];
 }): Promise<string> {
-  // Build contents in Gemini shape. We also pass systemInstruction.
   const contents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [];
   for (const h of opts.history ?? []) {
     contents.push({
@@ -299,8 +315,7 @@ async function callGeminiChat(opts: {
   );
 }
 
-/** Option type used by the enum listing helpers below */
-type Option<T extends string> = { value: T; label: string };
+// ---------- Utilities ----------
 function titleizeEnum(v: string): string {
   return v
     .split('_')
@@ -383,7 +398,6 @@ export class AgentService {
   ): Prisma.AgentWhereInput {
     const and: Prisma.AgentWhereInput[] = [];
 
-    // Optional scoping by user
     if (userId) and.push({ userId });
 
     // IDs
@@ -418,19 +432,19 @@ export class AgentService {
     }
 
     // Enums
-    const mt = normalizeMemoryType(q.memoryType);
+    const mt = normalizeMemoryType(q.memoryType as any);
     if (mt) and.push({ memoryType: mt });
 
-    const modelType = normalizeEnum<AIModel>(q.modelType, AI_MODELS);
+    const modelType = normalizeEnum<AIModel>(q.modelType as any, AI_MODELS);
     if (modelType) and.push({ modelType });
 
-    const oai = normalizeEnum<OpenAIModel>(q.openAIModel, OPENAI_MODELS);
+    const oai = normalizeEnum<OpenAIModel>(q.openAIModel as any, OPENAI_MODELS);
     if (oai) and.push({ openAIModel: oai });
 
-    const claude = normalizeEnum<ClaudeModel>(q.claudeModel, CLAUDE_MODELS);
+    const claude = normalizeEnum<ClaudeModel>(q.claudeModel as any, CLAUDE_MODELS);
     if (claude) and.push({ claudeModel: claude });
 
-    const gemini = normalizeEnum<GeminiModel>(q.geminiModel, GEMINI_MODELS);
+    const gemini = normalizeEnum<GeminiModel>(q.geminiModel as any, GEMINI_MODELS);
     if (gemini) and.push({ geminiModel: gemini });
 
     // Numeric
@@ -484,11 +498,107 @@ export class AgentService {
     return and.length ? { AND: and } : {};
   }
 
+  /** Normalize update payload defensively (in case controller pipes didn’t). */
+  private normalizeUpdatePayload(raw: UpdateAgentDto, current: Agent): UpdateAgentDto {
+    const data: any = { ...raw };
+
+    // Map UI alias → server field
+    if (typeof data.apiKey === 'string') {
+      data.userProvidedApiKey = data.apiKey;
+      delete data.apiKey;
+    }
+
+    // Trim name
+    if (typeof data.name === 'string') data.name = data.name.trim();
+
+    // Coerce flags (accept "true"/"false" as well)
+    const boolFields = [
+      'isActive',
+      'isLeadsActive',
+      'isEmailActive',
+      'isKnowledgebaseActive',
+      'isBookingActive',
+      'useOwnApiKey',
+      'isVoiceResponseAvailable',
+      'isImageDataExtraction',
+    ] as const;
+
+    for (const f of boolFields) {
+      if (f in data) {
+        const v = coerceBool((data as any)[f]);
+        if (typeof v === 'boolean') (data as any)[f] = v;
+      }
+    }
+
+    // Coerce historyLimit
+    if ('historyLimit' in data) {
+      const n = coerceInt((data as any).historyLimit);
+      if (typeof n === 'number' && n >= 0) (data as any).historyLimit = n;
+      else delete (data as any).historyLimit;
+    }
+
+    // Vendor models: null others when modelType is set
+    if (data.modelType) {
+      if (data.modelType !== AIModel.CHATGPT) data.openAIModel = null;
+      if (data.modelType !== AIModel.GEMINI) data.geminiModel = null;
+      if (data.modelType !== AIModel.CLAUDE) data.claudeModel = null;
+    }
+
+    // Prompt normalization happens later (we need effectiveName)
+    return data;
+  }
+
+  /** Normalize create payload defensively (apiKey alias + basic coercions). */
+  private normalizeCreatePayload(raw: CreateAgentDto): CreateAgentDto {
+    const data: any = { ...raw };
+
+    // Map UI alias → server field
+    if (typeof data.apiKey === 'string') {
+      data.userProvidedApiKey = data.apiKey;
+      delete data.apiKey;
+    }
+
+    // Coerce switches if necessary
+    const boolFields = [
+      'isActive',
+      'isLeadsActive',
+      'isEmailActive',
+      'isKnowledgebaseActive',
+      'isBookingActive',
+      'useOwnApiKey',
+      'isVoiceResponseAvailable',
+      'isImageDataExtraction',
+    ] as const;
+    for (const f of boolFields) {
+      if (f in data) {
+        const v = coerceBool((data as any)[f]);
+        if (typeof v === 'boolean') (data as any)[f] = v;
+      }
+    }
+
+    // Coerce historyLimit
+    if ('historyLimit' in data) {
+      const n = coerceInt((data as any).historyLimit);
+      if (typeof n === 'number' && n >= 0) (data as any).historyLimit = n;
+      else delete (data as any).historyLimit;
+    }
+
+    // Vendor models: null others when modelType is set
+    if (data.modelType) {
+      if (data.modelType !== AIModel.CHATGPT) data.openAIModel = null;
+      if (data.modelType !== AIModel.GEMINI) data.geminiModel = null;
+      if (data.modelType !== AIModel.CLAUDE) data.claudeModel = null;
+    }
+
+    // Name trim
+    if (typeof data.name === 'string') data.name = data.name.trim();
+
+    return data;
+  }
+
   // ---------------------------------------------------
   // Queries
   // ---------------------------------------------------
-
-  /** Generic getAll. Pass `userId` to scope to a user; omit to search globally. */
   async getAll(
     userId: string | undefined,
     query: GetAllAgentsQuery,
@@ -514,7 +624,6 @@ export class AgentService {
     };
   }
 
-  /** Convenience for “my agents”; used by controller’s GET /agents */
   async getAllForUser(
     userId: string,
     query: GetAllAgentsQuery,
@@ -531,18 +640,22 @@ export class AgentService {
     return agent;
   }
 
+  // ---------------------------------------------------
+  // Mutations
+  // ---------------------------------------------------
   async create(createAgentDto: CreateAgentDto): Promise<Agent> {
-    const { userId, name } = createAgentDto;
+    const normalized = this.normalizeCreatePayload(createAgentDto);
+    const { userId, name } = normalized;
 
-    if (!userId || !userId.trim()) {
+    if (!userId || !String(userId).trim()) {
       throw new BadRequestException('userId is required to create an agent.');
     }
-    if (!name || !name.trim()) {
+    if (!name || !String(name).trim()) {
       throw new BadRequestException('Agent name is required.');
     }
 
-    const uid = userId.trim();
-    const normalizedName = name.trim();
+    const uid = String(userId).trim();
+    const normalizedName = String(name).trim();
 
     // Ensure user exists
     const user = await this.prisma.user.findUnique({ where: { id: uid } });
@@ -556,21 +669,27 @@ export class AgentService {
     await this.assertUniqueName(uid, normalizedName);
 
     // Default prompt handling
-    const rawPrompt = (createAgentDto as any)?.prompt ?? '';
-    const normalizedPrompt =
+    const rawPrompt = (normalized as any)?.prompt ?? '';
+    const prompt =
       typeof rawPrompt === 'string' && rawPrompt.trim().length > 0
         ? rawPrompt.trim()
         : buildDefaultPrompt(normalizedName);
 
     try {
-      const { prompt: _ignored, name: _n, userId: _u, ...rest } =
-        createAgentDto as any;
+      const {
+        prompt: _ignored,
+        name: _n,
+        userId: _u,
+        apiKey: _legacyUIKey, // not present, but just in case
+        ...rest
+      } = normalized as any;
+
       return await this.prisma.agent.create({
         data: {
           ...rest,
           userId: uid,
           name: normalizedName,
-          prompt: normalizedPrompt,
+          prompt,
         } as any,
       });
     } catch (e: any) {
@@ -590,17 +709,18 @@ export class AgentService {
   ): Promise<Agent> {
     // Ensure ownership / existence
     const current = await this.getById(id, userId);
+    console.log('update', updateAgentDto)
+
+    // Defensive normalization (in case the controller didn’t coerce)
+    let data = this.normalizeUpdatePayload(updateAgentDto, current);
 
     // Enforce name uniqueness if renaming
-    let data: UpdateAgentDto = { ...updateAgentDto };
-
     let effectiveName = current.name;
-
-    if (typeof updateAgentDto.name === 'string') {
-      const newName = updateAgentDto.name.trim();
-      await this.assertUniqueName(current.userId, newName, id);
-      data = { ...data, name: newName };
-      effectiveName = newName;
+    if (typeof data.name === 'string' && data.name.length > 0) {
+      await this.assertUniqueName(current.userId, data.name, id);
+      effectiveName = data.name;
+    } else {
+      delete (data as any).name; // avoid setting empty name
     }
 
     // Prompt semantics:
@@ -612,8 +732,7 @@ export class AgentService {
       const trimmed = (typeof raw === 'string' ? raw : '').trim();
       data = {
         ...data,
-        prompt:
-          trimmed.length > 0 ? trimmed : buildDefaultPrompt(effectiveName),
+        prompt: trimmed.length > 0 ? trimmed : buildDefaultPrompt(effectiveName),
       } as any;
     }
 
@@ -664,7 +783,6 @@ export class AgentService {
   // ---------------------------------------------------
   // Chat (used by WhatsApp handler)
   // ---------------------------------------------------
-
   /** Pull `historyLimit` messages from DB for BUFFER memory. */
   private async getBufferHistory(
     agentId: string,
@@ -716,8 +834,8 @@ export class AgentService {
 
     // system prompt = override → agent.prompt → default
     const system =
-      (opts?.systemPromptOverride ?? 
-        agent.prompt ?? 
+      (opts?.systemPromptOverride ??
+        agent.prompt ??
         buildDefaultPrompt(agent.name)) + '';
 
     // history: only if BUFFER memory
@@ -806,42 +924,30 @@ export class AgentService {
   // ---------------------------------------------------
   // Enum-driven model options (for dynamic UI pickers)
   // ---------------------------------------------------
-
-  /** Providers (AIModel enum) as {value,label}[]
-   *  Example: [{ value: 'CHATGPT', label: 'Chatgpt' }, ...]
-   */
-  listProviders(): Option<AIModel>[] {
+  listProviders() {
     return (Object.values(AIModel) as AIModel[]).map((v) => ({
       value: v,
       label: titleizeEnum(v.toLowerCase()),
     }));
   }
-
-  /** OpenAIModel enum as {value,label}[] */
-  listOpenAIModels(): Option<OpenAIModel>[] {
+  listOpenAIModels() {
     return (Object.values(OpenAIModel) as OpenAIModel[]).map((v) => ({
       value: v,
       label: titleizeEnum(v),
     }));
   }
-
-  /** GeminiModel enum as {value,label}[] */
-  listGeminiModels(): Option<GeminiModel>[] {
+  listGeminiModels() {
     return (Object.values(GeminiModel) as GeminiModel[]).map((v) => ({
       value: v,
       label: titleizeEnum(v),
     }));
   }
-
-  /** ClaudeModel enum as {value,label}[] */
-  listClaudeModels(): Option<ClaudeModel>[] {
+  listClaudeModels() {
     return (Object.values(ClaudeModel) as ClaudeModel[]).map((v) => ({
       value: v,
       label: titleizeEnum(v),
     }));
   }
-
-  /** One-shot payload for building UI selectors */
   getAllModelOptions() {
     return {
       providers: this.listProviders(),

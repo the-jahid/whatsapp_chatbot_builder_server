@@ -6,7 +6,7 @@ import * as multer from 'multer';
 import { OutboundTemplateController } from './outbound-template.controller';
 import { OutboundTemplateService } from './outbound-template.service';
 import { OutboundTemplateRepository } from './repository/outbound-template.repository';
-import { PrismaService } from '../../prisma/prisma.service'; // <-- adjust if your path differs
+
 
 @Module({
   // Ensure uploaded files are kept in memory (so we can store the Buffer in Postgres)
@@ -20,7 +20,7 @@ import { PrismaService } from '../../prisma/prisma.service'; // <-- adjust if yo
     }),
   ],
   controllers: [OutboundTemplateController],
-  providers: [OutboundTemplateService, OutboundTemplateRepository, PrismaService],
+  providers: [OutboundTemplateService, OutboundTemplateRepository],
   exports: [OutboundTemplateService, OutboundTemplateRepository],
 })
 export class OutboundTemplateModule {}
