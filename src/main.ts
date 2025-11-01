@@ -3,75 +3,47 @@ import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { Logger, ValidationPipe } from '@nestjs/common';
 
-/**
- * Parse CORS_ORIGINS from env.
- * - CSV list (comma-separated)
- * - Supports wildcards like https://*.example.com
- * - Defaults to localhost dev ports
- */
+type OriginFn = import('@nestjs/common/interfaces/external/cors-options.interface').CorsOptions['origin'];
+
 function getAllowedOrigins(): string[] {
   const raw =
     process.env.CORS_ORIGINS ??
+    // dev defaults
     'http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000,http://127.0.0.1:3001';
-  return raw
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
+  return raw.split(',').map(s => s.trim()).filter(Boolean);
 }
 
-/**
- * Convert a single origin pattern to a RegExp matcher if it contains "*".
- * Otherwise return the exact string.
- */
 function compileOriginPattern(origin: string): string | RegExp {
   if (!origin.includes('*')) return origin;
-  // Escape regex specials, then replace \* with [^.]+ (subdomain wildcard)
-  const esc = origin.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\\\*/g, '[^.]+');
+  const esc = origin
+    .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+    .replace(/\\\*/g, '[^.]+'); // wildcard subdomain
   return new RegExp(`^${esc}$`, 'i');
 }
 
-/**
- * Build the origin option for enableCors. Handles:
- *  - exact matches
- *  - wildcard subdomains
- *  - "*" (allow all) with credentials=false (per CORS spec)
- */
-function buildCorsOriginOption() {
+function buildCorsOrigin(): { origin: OriginFn | true; allowAll: boolean; list: string[] } {
   const list = getAllowedOrigins();
 
-  // If user explicitly provided "*" anywhere, allow all (credentials must be false)
-  const hasStar = list.some((o) => o === '*' || o === '/*' || o.toLowerCase() === 'all');
+  // Explicit "allow all"
+  const hasStar = list.some(o => o === '*' || o === '/*' || o.toLowerCase() === 'all');
   if (hasStar) {
-    return {
-      origin: true as const, // reflect request origin
-      allowAll: true,
-    };
+    return { origin: true, allowAll: true, list };
   }
 
   const matchers = list.map(compileOriginPattern);
+  const origin: OriginFn = (reqOrigin, cb) => {
+    if (!reqOrigin) return cb(null, true); // server-to-server / no Origin
+    const ok = matchers.some(m => (typeof m === 'string' ? m === reqOrigin : (m as RegExp).test(reqOrigin)));
+    return ok ? cb(null, true) : cb(new Error(`Origin ${reqOrigin} not allowed by CORS`), false);
+  };
 
-  // Predicate used by Nest/Express CORS
-  const originFn: import('@nestjs/common/interfaces/external/cors-options.interface').CorsOptions['origin'] =
-    (reqOrigin, cb) => {
-      // server-to-server or same-origin requests (no Origin header)
-      if (!reqOrigin) return cb(null, true);
-
-      // exact string matchers
-      if (matchers.some((m) => (typeof m === 'string' ? m === reqOrigin : (m as RegExp).test(reqOrigin)))) {
-        return cb(null, true);
-      }
-
-      return cb(new Error(`Origin ${reqOrigin} not allowed by CORS`), false);
-    };
-
-  return { origin: originFn, allowAll: false };
+  return { origin, allowAll: false, list };
 }
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { cors: false });
 
-  // If you’re behind a proxy (Render/Heroku/etc.) and use cookies/sessions.
-  // Works with Express adapter.
+  // Behind proxy (Render/Heroku). Needed if you ever use cookies.
   // @ts-ignore
   if (typeof app.set === 'function') app.set('trust proxy', 1);
 
@@ -82,33 +54,69 @@ async function bootstrap() {
     'Accept',
     'X-Requested-With',
     'X-CSRF-Token',
+    'Origin',
+    'Referer',
+    'Sec-Fetch-Mode',
+    'Sec-Fetch-Site',
+    // Clerk/other auth libs sometimes send custom headers; add here if needed:
+    'X-Clerk-Auth',
+    'Clerk-Auth',
   ];
-  const EXPOSE_HEADERS = ['Content-Disposition']; // add if you serve file downloads
+  const EXPOSE_HEADERS = ['Content-Disposition'];
 
-  const { origin, allowAll } = buildCorsOriginOption();
+  const { origin, allowAll, list } = buildCorsOrigin();
 
+  // Primary CORS (handles normal preflights)
   app.enableCors({
-    origin, // exact/regex predicate OR true (reflect)
-    methods: METHODS.join(','),
-    allowedHeaders: ALLOWED_HEADERS.join(','),
-    exposedHeaders: EXPOSE_HEADERS.join(','),
-    credentials: allowAll ? false : true, // cannot be true when allowing all origins
-    maxAge: 86400, // cache preflight for 24h
+    origin,                                  // function matcher or reflect
+    credentials: allowAll ? false : true,    // cannot be true when allowing "*"
+    methods: METHODS,
+    allowedHeaders: ALLOWED_HEADERS,
+    exposedHeaders: EXPOSE_HEADERS,
+    maxAge: 86400,
     optionsSuccessStatus: 204,
     preflightContinue: false,
   });
 
-  // Global validation
+  // Fallback: ensure ANY stray OPTIONS still returns valid CORS headers
+  app.use((req: any, res: any, next: any) => {
+    const reqOrigin = req.headers.origin as string | undefined;
+
+    // Decide the response origin we’ll echo back
+    let allowOrigin: string | undefined;
+    if (!reqOrigin) {
+      allowOrigin = list[0]; // arbitrary, won’t be used by browsers w/o Origin
+    } else if (list.includes('*') || list.map(compileOriginPattern).some(m =>
+      typeof m === 'string' ? m === reqOrigin : (m as RegExp).test(reqOrigin)
+    )) {
+      allowOrigin = reqOrigin;
+    }
+
+    if (allowOrigin) {
+      res.header('Access-Control-Allow-Origin', allowOrigin);
+      res.header('Vary', 'Origin');
+    }
+    res.header('Access-Control-Allow-Credentials', allowAll ? 'false' : 'true');
+    res.header('Access-Control-Allow-Methods', METHODS.join(','));
+    res.header('Access-Control-Allow-Headers', ALLOWED_HEADERS.join(','));
+    res.header('Access-Control-Expose-Headers', EXPOSE_HEADERS.join(','));
+    res.header('Access-Control-Max-Age', '86400');
+
+    if (req.method === 'OPTIONS') return res.sendStatus(204);
+    return next();
+  });
+
+  // Validation
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
 
-  // Listen like a PaaS (Render) expects
   const port = Number(process.env.PORT ?? 3000);
   const host = process.env.HOST ?? '0.0.0.0';
   await app.listen(port, host);
 
-  const allowed = getAllowedOrigins().join(', ') || '(none)';
-  Logger.log(`API listening on http://${host === '0.0.0.0' ? 'localhost' : host}:${port}`);
-  Logger.log(`CORS enabled. Allowed origins: ${allowed}`);
+  Logger.log(
+    `API listening on http://${host === '0.0.0.0' ? 'localhost' : host}:${port}`
+  );
+  Logger.log(`CORS origins: ${list.length ? list.join(', ') : '(none)'}`);
 }
 
 bootstrap();
