@@ -6,16 +6,19 @@ import { OutboundBroadcastController } from './outbound-broadcast.controller';
 
 import { PrismaModule } from 'src/prisma/prisma.module';
 import { WhatsappModule } from 'src/agentModules/whatsapp/whatsapp.module';
+import { ConversationModule } from 'src/agentModules/conversation/conversation.module';
 
 @Module({
   imports: [
     PrismaModule,
     WhatsappModule,
-    // If ScheduleModule.forRoot() is already in AppModule, you can remove this line.
+    ConversationModule,      // <-- add this
+    // If ScheduleModule.forRoot() is already called in AppModule, remove this line here.
     ScheduleModule.forRoot(),
   ],
   controllers: [OutboundBroadcastController],
   providers: [OutboundBroadcastService],
-  exports: [OutboundBroadcastService], // <-- export so other modules can inject it
+  exports: [OutboundBroadcastService],
 })
 export class OutboundBroadcastModule {}
+

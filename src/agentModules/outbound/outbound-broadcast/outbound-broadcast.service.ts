@@ -12,26 +12,25 @@ import {
   TemplateMediaType,
   OutboundCampaignStatus,
   BroadcastStatus,
+  SenderType,
 } from '@prisma/client';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { z } from 'zod';
 
 import { PrismaService } from 'src/prisma/prisma.service';
 import { WhatsappService } from 'src/agentModules/whatsapp/whatsapp.service';
+import { ConversationService } from 'src/agentModules/conversation/conversation.service';
+
+
+// NOTE: CreateConversationDto likely does NOT include `metadata`, hence the payload cast below.
+// import { CreateConversationDto } from 'src/conversation/dto/conversation.dto';
 
 /* -------------------------------------------------------------------------- */
 /*                         GAP-BASED SENDING (NO BATCH)                        */
 /* -------------------------------------------------------------------------- */
-/**
- * We send exactly ONE message per pass.
- * The cadence is controlled by `broadcast.messageGapSeconds` (default 120s).
- * No other timing/wait logic is applied: if the gap is 30s, we will send
- * every ~30s (cron runs every second to honor sub-minute gaps).
- */
 const DEFAULT_MESSAGE_GAP_SECONDS = 120;
 const DEFAULT_ACK_TIMEOUT_MS = 90_000; // 90s
 
-/** Relaxed template shape (handles Buffer/Uint8Array across runtimes) */
 type RenderableTemplate =
   | {
       id: string;
@@ -51,61 +50,44 @@ type RenderableTemplate =
 
 const UpdateBroadcastSettingsSchema = z
   .object({
-    // toggles
     isEnabled: z.boolean().optional(),
     isPaused: z.boolean().optional(),
-
-    // scheduling
     startAt: z.union([z.date(), z.string(), z.null()]).optional(),
-
-    // single-message gap (seconds)
-    messageGapSeconds: z.coerce.number().int().min(0).max(86_400).optional(), // 0..24h
-
-    // template
+    messageGapSeconds: z.coerce.number().int().min(0).max(86_400).optional(),
     selectedTemplateId: z.string().uuid().nullable().optional(),
-
-    // manual status override (guarded below)
     status: z.nativeEnum(BroadcastStatus).optional(),
   })
   .strict();
 
-/** Allows patching *exactly one* field, strongly typed. */
 const SingleFieldPatchSchema = z.discriminatedUnion('field', [
   z.object({ field: z.literal('selectedTemplateId'), value: z.string().uuid().nullable() }),
   z.object({ field: z.literal('isEnabled'), value: z.boolean() }),
   z.object({ field: z.literal('isPaused'), value: z.boolean() }),
   z.object({ field: z.literal('status'), value: z.nativeEnum(BroadcastStatus) }),
   z.object({ field: z.literal('startAt'), value: z.union([z.date(), z.string(), z.null()]) }),
-  z.object({
-    field: z.literal('messageGapSeconds'),
-    value: z.number().int().min(0).max(86_400),
-  }),
+  z.object({ field: z.literal('messageGapSeconds'), value: z.number().int().min(0).max(86_400) }),
 ]);
 
 @Injectable()
 export class OutboundBroadcastService {
   private readonly logger = new Logger(OutboundBroadcastService.name);
 
-  /**
-   * In-process guard to prevent overlapping passes for the same broadcast.
-   * (Protects against "start" + cron firing at the same time.)
-   */
+  /** Prevent overlapping passes for same broadcast */
   private readonly inFlight = new Set<string>();
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly whatsapp: WhatsappService,
+    private readonly conversations: ConversationService,
   ) {}
 
   /* -------------------------------------------------------------------------- */
   /*                                PUBLIC API                                  */
   /* -------------------------------------------------------------------------- */
 
-  /** Enable a campaign’s Broadcast and run an immediate pass (1 msg, gap-aware). */
   async startCampaign(agentId: string, campaignId: string) {
     await this.assertCampaignOwnership(agentId, campaignId);
 
-    // Ensure broadcast row exists
     let b = await this.prisma.broadcast.findUnique({
       where: { outboundCampaignId: campaignId },
     });
@@ -127,20 +109,17 @@ export class OutboundBroadcastService {
       });
     }
 
-    // Flip campaign to RUNNING
     await this.prisma.outboundCampaign.update({
       where: { id: campaignId },
       data: { status: OutboundCampaignStatus.RUNNING },
     });
 
-    // Immediate pass (will respect messageGapSeconds internally)
     const summary = await this.processBroadcastPass(agentId, campaignId, b);
     await this.completeIfFinished(campaignId, b.id);
 
     return { status: 'RUNNING', ...summary };
   }
 
-  /** Pause a running/scheduled broadcast. */
   async pauseCampaign(agentId: string, campaignId: string) {
     await this.assertCampaignOwnership(agentId, campaignId);
 
@@ -164,10 +143,6 @@ export class OutboundBroadcastService {
     return { campaignId, broadcastId: b.id, status: 'PAUSED' as const };
   }
 
-  /**
-   * Resume a paused/scheduled broadcast. If startAt is in the future, sets READY/SCHEDULED;
-   * otherwise sets RUNNING and triggers an immediate pass (1 msg, gap-aware).
-   */
   async resumeCampaign(agentId: string, campaignId: string) {
     await this.assertCampaignOwnership(agentId, campaignId);
 
@@ -200,7 +175,6 @@ export class OutboundBroadcastService {
     return { campaignId, broadcastId: updated.id, status: 'READY' as const };
   }
 
-  /** UI helper for dashboard. */
   async getCampaignStatus(campaignId: string) {
     const [camp, b] = await Promise.all([
       this.prisma.outboundCampaign.findUnique({
@@ -231,32 +205,19 @@ export class OutboundBroadcastService {
     return { campaign: camp, broadcast: b, counters };
   }
 
-  /**
-   * Upsert/Update broadcast settings.
-   * ✅ Template-only updates DO NOT change status/isEnabled/isPaused/startAt or campaign status.
-   * ✅ Numeric-only updates DO NOT change status/isEnabled/isPaused/startAt or campaign status.
-   * ✅ Stateful updates derive Broadcast & Campaign status consistently.
-   */
-  async updateBroadcastSettings(
-    agentId: string,
-    campaignId: string,
-    payload: unknown,
-  ) {
+  async updateBroadcastSettings(agentId: string, campaignId: string, payload: unknown) {
     await this.assertCampaignOwnership(agentId, campaignId);
 
     const body = UpdateBroadcastSettingsSchema.parse(payload);
     const has = (k: keyof z.infer<typeof UpdateBroadcastSettingsSchema>) =>
       Object.prototype.hasOwnProperty.call(body, k);
 
-    // Validate template ownership if provided (null allowed for clearing)
     if (has('selectedTemplateId') && body.selectedTemplateId) {
       await this.loadAndAuthorizeTemplate(agentId, body.selectedTemplateId);
     }
 
-    // Ensure row exists first
     const current = await this.ensureBroadcastRow(campaignId);
 
-    // -------------------- TEMPLATE-ONLY (NO STATE FIELDS) --------------------
     const touchesStateWithoutTemplate =
       has('status') || has('isEnabled') || has('isPaused') || has('startAt');
 
@@ -269,7 +230,6 @@ export class OutboundBroadcastService {
       return { updated };
     }
 
-    // -------------------- NUMERIC-ONLY (messageGapSeconds) --------------------
     if (!touchesStateWithoutTemplate && !has('selectedTemplateId') && has('messageGapSeconds')) {
       const updated = await this.prisma.broadcast.update({
         where: { id: current.id },
@@ -279,7 +239,6 @@ export class OutboundBroadcastService {
       return { updated };
     }
 
-    // -------------------- STATEFUL PATH (status / toggles / startAt) ---------
     const now = new Date();
     const startAt =
       has('startAt')
@@ -295,7 +254,6 @@ export class OutboundBroadcastService {
       isPaused?: boolean;
     } = {};
 
-    // Manual status override allowed only for: READY, RUNNING, PAUSED, CANCELLED
     if (has('status') && body.status) {
       if (body.status === BroadcastStatus.COMPLETED) {
         throw new BadRequestException('Cannot manually set status to COMPLETED');
@@ -325,7 +283,6 @@ export class OutboundBroadcastService {
       }
     }
 
-    // Toggle-driven derivation (ONLY when explicit status is not provided)
     if (!has('status') && (has('isEnabled') || has('isPaused') || has('startAt'))) {
       const toggledEnabled = has('isEnabled') ? body.isEnabled! : current.isEnabled;
       const toggledPaused = has('isPaused') ? body.isPaused! : current.isPaused;
@@ -343,7 +300,6 @@ export class OutboundBroadcastService {
         next.isEnabled = false;
         next.isPaused = true;
       } else {
-        // enabled & not paused
         if (dueNow) {
           next.broadcastStatus = BroadcastStatus.RUNNING;
           next.campaignStatus = OutboundCampaignStatus.RUNNING;
@@ -359,7 +315,6 @@ export class OutboundBroadcastService {
     }
 
     const updateData: Prisma.BroadcastUpdateInput = {
-      // toggles (only when provided or derived)
       ...(has('isEnabled') || next.isEnabled !== undefined
         ? { isEnabled: next.isEnabled ?? body.isEnabled ?? current.isEnabled }
         : {}),
@@ -367,14 +322,8 @@ export class OutboundBroadcastService {
         ? { isPaused: next.isPaused ?? body.isPaused ?? current.isPaused }
         : {}),
       ...(next.broadcastStatus ? { status: next.broadcastStatus } : {}),
-
-      // scheduling
       ...(has('startAt') ? { startAt: startAt ?? null } : {}),
-
-      // numeric knob if provided together with state
       ...(has('messageGapSeconds') ? { messageGapSeconds: body.messageGapSeconds } : {}),
-
-      // template: if they *also* send template alongside stateful fields, allow updating the id
       ...(has('selectedTemplateId') ? { selectedTemplateId: body.selectedTemplateId ?? null } : {}),
     };
 
@@ -384,7 +333,6 @@ export class OutboundBroadcastService {
       select: this.broadcastSelect(),
     });
 
-    // Update campaign status only if we actually derived one
     if (next.campaignStatus) {
       await this.prisma.outboundCampaign.update({
         where: { id: campaignId },
@@ -392,7 +340,6 @@ export class OutboundBroadcastService {
       });
     }
 
-    // Only kick a pass when a stateful change *results* in RUNNING
     const shouldRun =
       (has('status') || has('isEnabled') || has('isPaused') || has('startAt')) &&
       updated.isEnabled &&
@@ -414,12 +361,10 @@ export class OutboundBroadcastService {
     return { updated };
   }
 
-  /** Patch exactly one field safely (template-only patches never alter state). */
   async patchBroadcastField(agentId: string, campaignId: string, patch: unknown) {
     await this.assertCampaignOwnership(agentId, campaignId);
     const parsed = SingleFieldPatchSchema.parse(patch);
 
-    // Ensure broadcast exists
     const current = await this.ensureBroadcastRow(campaignId);
 
     const now = new Date();
@@ -433,16 +378,13 @@ export class OutboundBroadcastService {
         if (templateId) {
           await this.loadAndAuthorizeTemplate(agentId, templateId);
         }
-        // STRICT: template-only patch never alters status/isEnabled/isPaused/campaign status.
         data.selectedTemplateId = templateId ?? null;
         break;
       }
-
       case 'messageGapSeconds': {
         data.messageGapSeconds = parsed.value;
         break;
       }
-
       case 'isEnabled': {
         const enabled = parsed.value;
         data.isEnabled = enabled;
@@ -468,7 +410,6 @@ export class OutboundBroadcastService {
         }
         break;
       }
-
       case 'isPaused': {
         const paused = parsed.value;
         data.isPaused = paused;
@@ -493,7 +434,6 @@ export class OutboundBroadcastService {
         }
         break;
       }
-
       case 'status': {
         const next = parsed.value;
         if (next === BroadcastStatus.COMPLETED) {
@@ -525,7 +465,6 @@ export class OutboundBroadcastService {
         }
         break;
       }
-
       case 'startAt': {
         const v = parsed.value;
         const startAt =
@@ -576,10 +515,6 @@ export class OutboundBroadcastService {
   /*                                   CRON                                     */
   /* -------------------------------------------------------------------------- */
 
-  /**
-   * Runs once per second and processes exactly ONE message per eligible broadcast,
-   * honoring messageGapSeconds (default 120s). No additional jitter/cooldowns.
-   */
   @Cron(CronExpression.EVERY_SECOND)
   async cronRunner() {
     const now = new Date();
@@ -612,13 +547,11 @@ export class OutboundBroadcastService {
 
     for (const b of broadcasts) {
       try {
-        // Skip if already in-flight (protect against overlap with start/resume/etc.)
         if (this.inFlight.has(b.id)) {
           this.logger.debug(`[CRON] Skip broadcast=${b.id} (in-flight)`);
           continue;
         }
 
-        // If campaign is SCHEDULED but due, move to RUNNING
         if (b.outboundCampaign.status === OutboundCampaignStatus.SCHEDULED) {
           await this.prisma.outboundCampaign.update({
             where: { id: b.outboundCampaignId },
@@ -630,11 +563,10 @@ export class OutboundBroadcastService {
           });
         }
 
-        // Honor message gap (check last send attempt timestamp — success or fail)
         const lastAttemptAt = await this.getLastAttemptAt(b.outboundCampaignId);
         const gapMs = (b.messageGapSeconds ?? DEFAULT_MESSAGE_GAP_SECONDS) * 1000;
         if (lastAttemptAt && Date.now() - lastAttemptAt.getTime() < gapMs) {
-          continue; // too soon
+          continue;
         }
 
         const summary = await this.processBroadcastPass(
@@ -662,14 +594,6 @@ export class OutboundBroadcastService {
   /*                             CORE SEND PASS                                 */
   /* -------------------------------------------------------------------------- */
 
-  /**
-   * Sends *one* message for a broadcast, honoring:
-   * - messageGapSeconds between attempts (success or failure)
-   * - lead.maxAttempts
-   * - template (image+caption OR text only)
-   *
-   * Also uses an in-process per-broadcast lock to prevent overlapping runs.
-   */
   private async processBroadcastPass(
     agentId: string,
     campaignId: string,
@@ -679,7 +603,6 @@ export class OutboundBroadcastService {
       selectedTemplateId?: string | null;
     },
   ) {
-    // In-process lock (prevents overlap)
     if (this.inFlight.has(broadcast.id)) {
       this.logger.debug(`[PASS] Skip broadcast=${broadcast.id} (in-flight)`);
       return { processed: 0, sent: 0, failed: 0, skipped: 0, reason: 'IN_FLIGHT' as const };
@@ -687,13 +610,11 @@ export class OutboundBroadcastService {
     this.inFlight.add(broadcast.id);
 
     try {
-      // Ensure WA session
       const wa = await this.prisma.whatsapp.findUnique({ where: { agentId } });
       if (!wa || !wa.sessionData) {
         throw new BadRequestException('WhatsApp session not connected for this agent');
       }
 
-      // Honor message gap (again, as a safety net) — based on any previous attempt
       const lastAttemptAt = await this.getLastAttemptAt(campaignId);
       const gapSec = broadcast.messageGapSeconds ?? DEFAULT_MESSAGE_GAP_SECONDS;
       if (lastAttemptAt && Date.now() - lastAttemptAt.getTime() < gapSec * 1000) {
@@ -706,12 +627,10 @@ export class OutboundBroadcastService {
         };
       }
 
-      // Template (optional)
       const template = broadcast.selectedTemplateId
         ? await this.loadAndAuthorizeTemplate(agentId, broadcast.selectedTemplateId)
         : null;
 
-      // Eligible next lead (single)
       const now = new Date();
       const lead = await this.prisma.outboundLead.findFirst({
         where: {
@@ -741,7 +660,6 @@ export class OutboundBroadcastService {
         };
       }
 
-      // Mark IN_PROGRESS & bump attempts (this also sets lastAttemptAt -> used for next gap)
       await this.prisma.outboundLead.update({
         where: { id: lead.id },
         data: {
@@ -751,7 +669,6 @@ export class OutboundBroadcastService {
         },
       });
 
-      // Attempts gate
       const maxAttempts = typeof lead.maxAttempts === 'number' && lead.maxAttempts > 0 ? lead.maxAttempts : 3;
       const attemptsIncludingThis = (lead.attemptsMade ?? 0) + 1;
       if (attemptsIncludingThis > maxAttempts) {
@@ -763,7 +680,6 @@ export class OutboundBroadcastService {
         return { processed: 1, sent: 0, failed: 0, skipped: 1 };
       }
 
-      // Render & send
       let sent = 0;
       let failed = 0;
 
@@ -783,6 +699,37 @@ export class OutboundBroadcastService {
           : this.whatsappSendText(agentId, lead.phoneNumber!, text);
 
         await this.withTimeout(sendPromise, DEFAULT_ACK_TIMEOUT_MS, 'ACK_TIMEOUT');
+
+        // ✅ conversation log payload — WIDEN TYPE to allow metadata
+        const payload: any = {
+          agentId,
+          senderJid: lead.phoneNumber+'@s.whatsapp.net'!, // or `${digits}@s.whatsapp.net`
+          senderType: SenderType.AI,
+          message: media ? (media.caption ?? text) : text,
+          metadata: {
+            direction: 'OUTBOUND',
+            campaignId,
+            broadcastId: broadcast.id,
+            leadId: lead.id,
+            templateId: template?.id ?? null,
+            media: media
+              ? {
+                  mimeType: media.mimeType,
+                  filename: media.filename,
+                  size: media.data?.length ?? undefined,
+                  hasMedia: true,
+                }
+              : { hasMedia: false },
+          },
+        };
+
+        try {
+          await this.conversations.create(payload);
+        } catch (logErr: any) {
+          this.logger.error(
+            `[CONV SAVE ERR] campaign=${campaignId} to=${lead.phoneNumber} -> ${logErr?.message || logErr}`,
+          );
+        }
 
         await this.prisma.outboundLead.update({
           where: { id: lead.id },
@@ -804,7 +751,6 @@ export class OutboundBroadcastService {
         failed += 1;
       }
 
-      // Refresh counters
       await this.updateBroadcastCounters(broadcast.id, campaignId);
 
       return { processed: 1, sent, failed, skipped: 0 };
@@ -829,10 +775,7 @@ export class OutboundBroadcastService {
         where: { outboundCampaignId: campaignId, status: OutboundLeadStatus.IN_PROGRESS },
       }),
       this.prisma.outboundLead.count({
-        where: {
-          outboundCampaignId: campaignId,
-          status: OutboundLeadStatus.MESSAGE_SUCCESSFUL,
-        },
+        where: { outboundCampaignId: campaignId, status: OutboundLeadStatus.MESSAGE_SUCCESSFUL },
       }),
       this.prisma.outboundLead.count({
         where: { outboundCampaignId: campaignId, status: OutboundLeadStatus.FAILED },
@@ -883,10 +826,6 @@ export class OutboundBroadcastService {
     return { queued, retry, inprog };
   }
 
-  /**
-   * Returns the Date of the last send attempt (success or failure) for a campaign,
-   * using the per-lead `lastAttemptAt` field.
-   */
   private async getLastAttemptAt(campaignId: string): Promise<Date | null> {
     const last = await this.prisma.outboundLead.findFirst({
       where: {

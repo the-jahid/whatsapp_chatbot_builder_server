@@ -103,44 +103,74 @@ export class WhatsappService implements OnModuleInit {
     const originalDebug = console.debug;
 
     const shouldSuppress = (args: any[]): boolean => {
-      const str = JSON.stringify(args);
+      // SAFE string extraction, avoids JSON.stringify (circular refs)
+      const text = args
+        .map((a) => {
+          if (typeof a === 'string') return a;
+          if (a && typeof a.message === 'string') return a.message;
+          return '';
+        })
+        .join(' ');
+
+      if (!text) return false;
+
       return (
-        str.includes('Closing stale open session') ||
-        str.includes('Closing session') ||
-        str.includes('Session error') ||
-        str.includes('Failed to decrypt') ||
-        str.includes('Bad MAC') ||
-        str.includes('privKey:') ||
-        str.includes('indexInfo:') ||
-        str.includes('chainKey:') ||
-        str.includes('SessionEntry') ||
-        str.includes('baseKey:') ||
-        str.includes('remoteIdentityKey:') ||
-        str.includes('registrationId:') ||
-        str.includes('currentRatchet:') ||
-        str.includes('@whiskeysockets') ||
-        str.includes('baileys') ||
-        str.includes('libsignal') ||
-        str.includes('verifyMAC') ||
-        str.includes('SessionCipher') ||
-        str.includes('doDecryptWhisperMessage')
+        text.includes('Closing stale open session') ||
+        text.includes('Closing session') ||
+        text.includes('Session error') ||
+        text.includes('Failed to decrypt') ||
+        text.includes('Bad MAC') ||
+        text.includes('privKey:') ||
+        text.includes('indexInfo:') ||
+        text.includes('chainKey:') ||
+        text.includes('SessionEntry') ||
+        text.includes('baseKey:') ||
+        text.includes('remoteIdentityKey:') ||
+        text.includes('registrationId:') ||
+        text.includes('currentRatchet:') ||
+        text.includes('@whiskeysockets') ||
+        text.includes('baileys') ||
+        text.includes('libsignal') ||
+        text.includes('verifyMAC') ||
+        text.includes('SessionCipher') ||
+        text.includes('doDecryptWhisperMessage')
       );
     };
 
     console.log = (...args: any[]) => {
-      if (!shouldSuppress(args)) originalLog.apply(console, args);
+      try {
+        if (!shouldSuppress(args)) originalLog.apply(console, args);
+      } catch {
+        originalLog.apply(console, args);
+      }
     };
     console.error = (...args: any[]) => {
-      if (!shouldSuppress(args)) originalError.apply(console, args);
+      try {
+        if (!shouldSuppress(args)) originalError.apply(console, args);
+      } catch {
+        originalError.apply(console, args);
+      }
     };
     console.warn = (...args: any[]) => {
-      if (!shouldSuppress(args)) originalWarn.apply(console, args);
+      try {
+        if (!shouldSuppress(args)) originalWarn.apply(console, args);
+      } catch {
+        originalWarn.apply(console, args);
+      }
     };
     console.info = (...args: any[]) => {
-      if (!shouldSuppress(args)) originalInfo.apply(console, args);
+      try {
+        if (!shouldSuppress(args)) originalInfo.apply(console, args);
+      } catch {
+        originalInfo.apply(console, args);
+      }
     };
     console.debug = (...args: any[]) => {
-      if (!shouldSuppress(args)) originalDebug.apply(console, args);
+      try {
+        if (!shouldSuppress(args)) originalDebug.apply(console, args);
+      } catch {
+        originalDebug.apply(console, args);
+      }
     };
   }
 
@@ -457,6 +487,17 @@ export class WhatsappService implements OnModuleInit {
         socket.ev.on('connection.update', async (update) => {
           const { connection, lastDisconnect, qr } = update;
           const c = this.connections.get(agentId);
+          const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
+          const reason = statusCode != null ? DisconnectReason[statusCode] : undefined;
+
+          console.log('WA connection.update (start)', {
+            agentId,
+            connection,
+            statusCode,
+            reason,
+            errorMessage: (lastDisconnect?.error as any)?.message,
+          });
+
           if (!c) return;
 
           if (qr && !c.paused) {
@@ -471,25 +512,46 @@ export class WhatsappService implements OnModuleInit {
           }
 
           if (connection === 'close') {
-            const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
-            c.status = 'close';
-            c.qr = undefined;
+            // If WhatsApp explicitly logs us out (conflict, etc.), clean up and STOP retrying
+            if (statusCode === DisconnectReason.loggedOut) {
+              console.error('WA loggedOut (conflict / remote logout)', {
+                agentId,
+                statusCode,
+                reason,
+              });
 
-            if (!promiseHandled) {
-              promiseHandled = true;
-              const reason = (statusCode && DisconnectReason[statusCode]) || 'Unknown';
-              reject(new Error(`Connection closed. Reason: ${reason}`));
-            }
+              c.status = 'close';
+              c.qr = undefined;
 
-            if (!c.paused && statusCode !== DisconnectReason.loggedOut) {
-              setTimeout(() => this.start(agentId).catch(() => {}), 5000);
-            } else if (statusCode === DisconnectReason.loggedOut) {
               await this.prisma.whatsapp.update({
                 where: { agentId },
                 data: { sessionData: Prisma.JsonNull, whatsappJid: null, whatsappName: null },
               });
               this.connections.delete(agentId);
               this.invalidateQrTicket(agentId);
+
+              if (!promiseHandled) {
+                promiseHandled = true;
+                return reject(
+                  new Error(
+                    'WhatsApp logged out this session (conflict / remote logout). Clear other sessions or use another number.',
+                  ),
+                );
+              }
+              return;
+            }
+
+            // Other close reasons → allow retry
+            c.status = 'close';
+            c.qr = undefined;
+
+            if (!promiseHandled) {
+              promiseHandled = true;
+              reject(new Error(`Connection closed. Reason: ${reason || 'Unknown'}`));
+            }
+
+            if (!c.paused) {
+              setTimeout(() => this.start(agentId).catch(() => {}), 5000);
             }
           } else if (connection === 'open') {
             c.status = 'open';
@@ -525,7 +587,6 @@ export class WhatsappService implements OnModuleInit {
           try {
             await this.messageHandler.handleMessage(socket, msg, agentId);
           } catch (err) {
-            // best-effort fallback; do not throw
             try {
               await socket.sendMessage(msg.key.remoteJid!, {
                 text: 'Sorry, I encountered an error. Please try again later.',
@@ -645,6 +706,17 @@ export class WhatsappService implements OnModuleInit {
         socket.ev.on('connection.update', async (update) => {
           const { connection, lastDisconnect, qr } = update;
           const c = this.connections.get(agentId);
+          const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
+          const reason = statusCode != null ? DisconnectReason[statusCode] : undefined;
+
+          console.log('WA connection.update (startWithPhone)', {
+            agentId,
+            connection,
+            statusCode,
+            reason,
+            errorMessage: (lastDisconnect?.error as any)?.message,
+          });
+
           if (!c) return;
 
           if (qr && !c.paused) {
@@ -658,26 +730,46 @@ export class WhatsappService implements OnModuleInit {
           }
 
           if (connection === 'close') {
-            const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
-            c.status = 'close';
-            c.qr = undefined;
-            c.pairingCode = undefined;
+            if (statusCode === DisconnectReason.loggedOut) {
+              console.error('WA loggedOut (conflict / remote logout) [startWithPhone]', {
+                agentId,
+                statusCode,
+                reason,
+              });
 
-            if (!promiseHandled) {
-              promiseHandled = true;
-              const reason = (statusCode && DisconnectReason[statusCode]) || 'Unknown';
-              reject(new Error(`Connection closed. Reason: ${reason}`));
-            }
+              c.status = 'close';
+              c.qr = undefined;
+              c.pairingCode = undefined;
 
-            if (!c.paused && statusCode !== DisconnectReason.loggedOut) {
-              setTimeout(() => this.startWithPhone(agentId, phoneNumber).catch(() => {}), 5000);
-            } else if (statusCode === DisconnectReason.loggedOut) {
               await this.prisma.whatsapp.update({
                 where: { agentId },
                 data: { sessionData: Prisma.JsonNull, whatsappJid: null, whatsappName: null },
               });
               this.connections.delete(agentId);
               this.invalidateQrTicket(agentId);
+
+              if (!promiseHandled) {
+                promiseHandled = true;
+                return reject(
+                  new Error(
+                    'WhatsApp logged out this session (conflict / remote logout). Clear other sessions or use another number.',
+                  ),
+                );
+              }
+              return;
+            }
+
+            c.status = 'close';
+            c.qr = undefined;
+            c.pairingCode = undefined;
+
+            if (!promiseHandled) {
+              promiseHandled = true;
+              reject(new Error(`Connection closed. Reason: ${reason || 'Unknown'}`));
+            }
+
+            if (!c.paused) {
+              setTimeout(() => this.startWithPhone(agentId, phoneNumber).catch(() => {}), 5000);
             }
           } else if (connection === 'open') {
             c.status = 'open';
@@ -726,10 +818,10 @@ export class WhatsappService implements OnModuleInit {
           try {
             const normalized = this.normalizePairingPhone(phoneNumber);
             const code = await (socket as any).requestPairingCode(normalized);
-            const c = this.connections.get(agentId);
-            if (c) {
-              c.pairingCode = code;
-              c.status = 'connecting';
+            const c2 = this.connections.get(agentId);
+            if (c2) {
+              c2.pairingCode = code;
+              c2.status = 'connecting';
             }
             if (!promiseHandled) {
               promiseHandled = true;

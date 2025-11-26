@@ -19,6 +19,10 @@ export class ConversationController {
 
   constructor(private readonly conversationService: ConversationService) {}
 
+  /* -------------------------------------------------------------------------- */
+  /*                           GET ALL FOR AGENT                                 */
+  /* -------------------------------------------------------------------------- */
+
   @Get('agent/:agentId')
   @ApiOperation({ summary: "Get all conversations for a specific agent" })
   @ApiParam({ name: 'agentId', description: 'The UUID of the agent', type: 'string' })
@@ -38,6 +42,10 @@ export class ConversationController {
       );
     }
   }
+
+  /* -------------------------------------------------------------------------- */
+  /*                         GET ALL FOR USER (AGENT+JID)                        */
+  /* -------------------------------------------------------------------------- */
 
   @Get('user/:agentId/:senderJid')
   @ApiOperation({ summary: "Get an agent's conversation history with a specific user" })
@@ -63,6 +71,10 @@ export class ConversationController {
     }
   }
 
+  /* -------------------------------------------------------------------------- */
+  /*                         GET SINGLE CONVERSATION ENTRY                       */
+  /* -------------------------------------------------------------------------- */
+
   @Get(':id')
   @ApiOperation({ summary: 'Get a single conversation message by its ID' })
   @ApiParam({ name: 'id', description: 'The CUID of the conversation message', type: 'string' })
@@ -73,16 +85,43 @@ export class ConversationController {
     try {
       return await this.conversationService.findOne(id);
     } catch (error) {
-      // The service throws specific exceptions, so we can re-throw them directly.
-      if (error instanceof HttpException) {
-        throw error;
-      }
+      if (error instanceof HttpException) throw error;
+
       this.logger.error(
         `Failed to get conversation with ID ${id}: ${error.message}`,
         error.stack,
       );
       throw new HttpException(
         'Failed to retrieve conversation.',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /* -------------------------------------------------------------------------- */
+  /*                 🔥 NEW ENDPOINT: SENT NUMBERS BY CAMPAIGN ID                */
+  /* -------------------------------------------------------------------------- */
+
+  @Get('campaign/:campaignId/sent-numbers')
+  @ApiOperation({
+    summary: 'Get all phone numbers that were sent outbound messages for this campaign',
+  })
+  @ApiParam({ name: 'campaignId', description: 'The campaign UUID', type: 'string' })
+  @ApiResponse({
+    status: 200,
+    description: 'Returns all unique phone numbers that received outbound messages.',
+  })
+  @ApiResponse({ status: 500, description: 'Internal server error.' })
+  async getSentNumbers(@Param('campaignId') campaignId: string) {
+    try {
+      return await this.conversationService.getSentNumbersByCampaign(campaignId);
+    } catch (error) {
+      this.logger.error(
+        `Failed to fetch sent numbers for campaign ${campaignId}: ${error.message}`,
+        error.stack,
+      );
+      throw new HttpException(
+        'Failed to retrieve sent numbers for this campaign.',
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }
