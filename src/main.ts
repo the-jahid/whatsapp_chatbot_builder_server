@@ -26,10 +26,10 @@ const ALLOWED_HEADERS = [
 const EXPOSE_HEADERS = ['Content-Disposition'];
 
 async function bootstrap() {
-  // disable Nest auto-CORS, we configure manually
+  // Create Nest app with CORS disabled (we configure it manually)
   const app = await NestFactory.create(AppModule, { cors: false });
 
-  // Behind proxy (Render/Heroku/etc) – useful if you ever use cookies
+  // Behind proxy (useful if you ever use cookies / X-Forwarded-For)
   if (typeof (app as any).set === 'function') {
     (app as any).set('trust proxy', 1);
   }
@@ -41,8 +41,8 @@ async function bootstrap() {
 
   // Primary CORS (handles normal browser preflights)
   app.enableCors({
-    origin,                 // allow any origin, reflected back
-    credentials: true,      // allow cookies / Authorization header
+    origin, // allow any origin, reflected back
+    credentials: true, // allow cookies / Authorization header
     methods: METHODS,
     allowedHeaders: ALLOWED_HEADERS,
     exposedHeaders: EXPOSE_HEADERS,
@@ -80,14 +80,15 @@ async function bootstrap() {
   // Global validation
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
 
-  const port = Number(process.env.PORT ?? 3000);
-  const host = process.env.HOST ?? '0.0.0.0';
+  // ---- LISTEN: no env vars, port fixed to 3000 ----
+  const port = 3000;
 
-  await app.listen(port, host);
+  // NOTE: calling listen(port) with NO host:
+  // on modern Linux + Node this binds to :: with ipv6Only=false,
+  // so it accepts BOTH IPv4 and IPv6.
+  await app.listen(port);
 
-  Logger.log(
-    `API listening on http://${host === '0.0.0.0' ? 'localhost' : host}:${port}`,
-  );
+  Logger.log(`API listening on port ${port} (IPv4 + IPv6 if supported)`);
   Logger.log('CORS: allowing ALL origins');
 }
 
