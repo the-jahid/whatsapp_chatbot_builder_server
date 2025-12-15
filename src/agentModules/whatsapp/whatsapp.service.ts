@@ -465,8 +465,8 @@ export class WhatsappService implements OnModuleInit {
         const socket = makeWASocket({
           version,
           printQRInTerminal: false,
-          auth: { creds, keys: makeCacheableSignalKeyStore(signalStore, this.baileysLogger) },
-          logger: this.baileysLogger,
+          auth: { creds, keys: makeCacheableSignalKeyStore(signalStore, this.baileysLogger as any) },
+          logger: this.baileysLogger as any,
         });
 
         const connInMap = this.connections.get(agentId);
@@ -684,8 +684,8 @@ export class WhatsappService implements OnModuleInit {
         const socket = makeWASocket({
           version,
           printQRInTerminal: false,
-          auth: { creds, keys: makeCacheableSignalKeyStore(signalStore, this.baileysLogger) },
-          logger: this.baileysLogger,
+          auth: { creds, keys: makeCacheableSignalKeyStore(signalStore, this.baileysLogger as any) },
+          logger: this.baileysLogger as any,
         });
 
         const connInMap = this.connections.get(agentId);

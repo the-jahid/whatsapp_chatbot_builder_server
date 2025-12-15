@@ -4,7 +4,6 @@ import { OutboundLeadService } from './outbound-lead.service';
 import { OutboundLeadRepository } from './repository/outbound-lead.repository';
 import { OutboundLeadController } from './outbound-lead.controller';
 
-import { PrismaModule } from 'src/prisma/prisma.module';
 import { LeadCustomFieldIntakeModule } from '../lead-custom-field-intake/lead-custom-field-intake.module';
 import { OutboundBroadcastModule } from '../outbound-broadcast/outbound-broadcast.module';
 
@@ -13,7 +12,6 @@ import { OutboundBroadcastModule } from '../outbound-broadcast/outbound-broadcas
 
 @Module({
   imports: [
-    PrismaModule,
     LeadCustomFieldIntakeModule,
     // forwardRef is safe here; remove forwardRef if you prefer (no cycle currently).
     forwardRef(() => OutboundBroadcastModule),
@@ -22,4 +20,4 @@ import { OutboundBroadcastModule } from '../outbound-broadcast/outbound-broadcas
   providers: [OutboundLeadService, OutboundLeadRepository],
   exports: [OutboundLeadService, OutboundLeadRepository],
 })
-export class OutboundLeadModule {}
+export class OutboundLeadModule { }

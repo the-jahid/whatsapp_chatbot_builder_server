@@ -3,9 +3,6 @@ import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { Logger, ValidationPipe } from '@nestjs/common';
 
-type OriginFn =
-  import('@nestjs/common/interfaces/external/cors-options.interface').CorsOptions['origin'];
-
 const METHODS = ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'];
 
 const ALLOWED_HEADERS = [
@@ -18,7 +15,7 @@ const ALLOWED_HEADERS = [
   'Referer',
   'Sec-Fetch-Mode',
   'Sec-Fetch-Site',
-  // Clerk / other auth libs
+  // Clerk / altre auth libs
   'X-Clerk-Auth',
   'Clerk-Auth',
 ];
@@ -26,70 +23,49 @@ const ALLOWED_HEADERS = [
 const EXPOSE_HEADERS = ['Content-Disposition'];
 
 async function bootstrap() {
-  // Create Nest app with CORS disabled (we configure it manually)
+  // ❌ niente CORS automatico di Nest, lo gestiamo noi
   const app = await NestFactory.create(AppModule, { cors: false });
 
-  // Behind proxy (useful if you ever use cookies / X-Forwarded-For)
+  // Se sei dietro proxy (ngrok, nginx, cloudflare ecc.)
   if (typeof (app as any).set === 'function') {
     (app as any).set('trust proxy', 1);
   }
 
-  /** Allow ANY origin (the cors lib will echo back the request origin) */
-  const origin: OriginFn = (_reqOrigin, cb) => {
-    cb(null, true); // always allow
-  };
-
-  // Primary CORS (handles normal browser preflights)
-  app.enableCors({
-    origin, // allow any origin, reflected back
-    credentials: true, // allow cookies / Authorization header
-    methods: METHODS,
-    allowedHeaders: ALLOWED_HEADERS,
-    exposedHeaders: EXPOSE_HEADERS,
-    maxAge: 86400,
-    optionsSuccessStatus: 204,
-    preflightContinue: false,
-  });
-
-  // Extra safety: handle any stray OPTIONS + set headers on all responses
+  // ✅ CORS unico per tutte le richieste
   app.use((req: any, res: any, next: any) => {
-    const reqOrigin = req.headers.origin as string | undefined;
+    const origin = req.headers.origin as string | undefined;
 
-    if (reqOrigin) {
-      // echo the caller origin (needed when credentials: true)
-      res.header('Access-Control-Allow-Origin', reqOrigin);
-      res.header('Vary', 'Origin');
-    } else {
-      // non-browser / no Origin header
-      res.header('Access-Control-Allow-Origin', '*');
+    if (origin) {
+      // IMPORTANTISSIMO: nessun '*', echo esatto dell’origin
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
     }
+    // Se non c'è Origin (es. Postman), non mettiamo proprio il header
 
-    res.header('Access-Control-Allow-Credentials', 'true');
-    res.header('Access-Control-Allow-Methods', METHODS.join(','));
-    res.header('Access-Control-Allow-Headers', ALLOWED_HEADERS.join(','));
-    res.header('Access-Control-Expose-Headers', EXPOSE_HEADERS.join(','));
-    res.header('Access-Control-Max-Age', '86400');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Allow-Methods', METHODS.join(','));
+    res.setHeader('Access-Control-Allow-Headers', ALLOWED_HEADERS.join(','));
+    res.setHeader('Access-Control-Expose-Headers', EXPOSE_HEADERS.join(','));
+    res.setHeader('Access-Control-Max-Age', '86400');
 
     if (req.method === 'OPTIONS') {
+      // Preflight finisce qui
       return res.sendStatus(204);
     }
 
     return next();
   });
 
-  // Global validation
+  // Validation globale
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
 
-  // ---- LISTEN: no env vars, port fixed to 3000 ----
   const port = 3000;
 
-  // NOTE: calling listen(port) with NO host:
-  // on modern Linux + Node this binds to :: with ipv6Only=false,
-  // so it accepts BOTH IPv4 and IPv6.
-  await app.listen(port);
+  // Ascolta su tutte le interfacce (IPv4)
+  await app.listen(port, '0.0.0.0');
 
-  Logger.log(`API listening on port ${port} (IPv4 + IPv6 if supported)`);
-  Logger.log('CORS: allowing ALL origins');
+  Logger.log(`API listening on http://0.0.0.0:${port}`);
+  Logger.log('CORS: dynamic origin, credentials allowed, wildcard disabilitato');
 }
 
 bootstrap();
