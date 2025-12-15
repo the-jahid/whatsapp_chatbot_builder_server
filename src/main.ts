@@ -33,25 +33,17 @@ async function bootstrap() {
     (app as any).set('trust proxy', 1);
   }
 
-  // ✅ CORS unico per tutte le richieste
+  // ✅ CORS - Accept all origins (wildcard) for maximum compatibility
   app.use((req: any, res: any, next: any) => {
-    const origin = req.headers.origin as string | undefined;
-
-    if (origin) {
-      // IMPORTANTISSIMO: nessun '*', echo esatto dell’origin
-      res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Vary', 'Origin');
-    }
-    // Se non c'è Origin (es. Postman), non mettiamo proprio il header
-
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    // Allow ALL origins with wildcard - no restrictions
+    res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', METHODS.join(','));
     res.setHeader('Access-Control-Allow-Headers', ALLOWED_HEADERS.join(','));
     res.setHeader('Access-Control-Expose-Headers', EXPOSE_HEADERS.join(','));
     res.setHeader('Access-Control-Max-Age', '86400');
 
     if (req.method === 'OPTIONS') {
-      // Preflight finisce qui
+      // Preflight finishes here
       return res.sendStatus(204);
     }
 
@@ -67,7 +59,7 @@ async function bootstrap() {
   await app.listen(port, '0.0.0.0');
 
   Logger.log(`API listening on http://0.0.0.0:${port}`);
-  Logger.log('CORS: dynamic origin, credentials allowed, wildcard disabilitato');
+  Logger.log('CORS: WILDCARD (*) - All origins allowed');
 }
 
 bootstrap();
