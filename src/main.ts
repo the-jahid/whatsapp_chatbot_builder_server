@@ -15,6 +15,8 @@ const ALLOWED_HEADERS = [
   'Referer',
   'Sec-Fetch-Mode',
   'Sec-Fetch-Site',
+  'Access-Control-Request-Headers',
+  'Access-Control-Request-Method',
   // Clerk / altre auth libs
   'X-Clerk-Auth',
   'Clerk-Auth',
