@@ -3,63 +3,47 @@ import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { Logger, ValidationPipe } from '@nestjs/common';
 
-const METHODS = ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'];
-
-const ALLOWED_HEADERS = [
-  'Content-Type',
-  'Authorization',
-  'Accept',
-  'X-Requested-With',
-  'X-CSRF-Token',
-  'Origin',
-  'Referer',
-  'Sec-Fetch-Mode',
-  'Sec-Fetch-Site',
-  'Access-Control-Request-Headers',
-  'Access-Control-Request-Method',
-  // Clerk / altre auth libs
-  'X-Clerk-Auth',
-  'Clerk-Auth',
-];
-
-const EXPOSE_HEADERS = ['Content-Disposition'];
-
 async function bootstrap() {
-  // ❌ niente CORS automatico di Nest, lo gestiamo noi
-  const app = await NestFactory.create(AppModule, { cors: false });
+  // 1. Create the app WITHOUT passing { cors: ... } here.
+  // We will handle CORS manually below.
+  const app = await NestFactory.create(AppModule);
 
-  // Se sei dietro proxy (ngrok, nginx, cloudflare ecc.)
-  if (typeof (app as any).set === 'function') {
-    (app as any).set('trust proxy', 1);
-  }
+  // 2. Enable CORS with specific options.
+  // We use a dynamic callback for 'origin' to be robust against trailing slashes.
+  app.enableCors({
+    origin: (requestOrigin, callback) => {
+      const allowedOrigins = [
+        'http://localhost:3001', // Your Frontend
+        'http://localhost:3000', // Local Dev
+        'https://9b90be51bd86.ngrok-free.app', // Ngrok tunnel
+        // Add production domains here if needed
+      ];
 
-  // ✅ CORS - Accept all origins (wildcard) for maximum compatibility
-  app.use((req: any, res: any, next: any) => {
-    // Allow ALL origins with wildcard - no restrictions
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', METHODS.join(','));
-    res.setHeader('Access-Control-Allow-Headers', ALLOWED_HEADERS.join(','));
-    res.setHeader('Access-Control-Expose-Headers', EXPOSE_HEADERS.join(','));
-    res.setHeader('Access-Control-Max-Age', '86400');
+      // Allow requests with no origin (like mobile apps or curl requests)
+      if (!requestOrigin) {
+        return callback(null, true);
+      }
 
-    if (req.method === 'OPTIONS') {
-      // Preflight finishes here
-      return res.sendStatus(204);
-    }
-
-    return next();
+      if (allowedOrigins.includes(requestOrigin)) {
+        // If the origin is in our list, allow it
+        callback(null, true);
+      } else {
+        // Optional: Log blocked origins for debugging
+        Logger.warn(`Blocked CORS request from: ${requestOrigin}`);
+        callback(new Error('Not allowed by CORS'));
+      }
+    },
+    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
+    credentials: true, // This enables cookies/auth headers
   });
 
-  // Validation globale
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
 
-  const port = 3000;
-
-  // Ascolta su tutte le interfacce (IPv4)
+  const port = process.env.PORT || 3000;
   await app.listen(port, '0.0.0.0');
 
   Logger.log(`API listening on http://0.0.0.0:${port}`);
-  Logger.log('CORS: WILDCARD (*) - All origins allowed');
+  Logger.log(`CORS is enabled for: http://localhost:3001`);
 }
 
 bootstrap();
