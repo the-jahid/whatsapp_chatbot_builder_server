@@ -16,6 +16,7 @@ async function bootstrap() {
         'http://localhost:3001', // Your Frontend
         'http://localhost:3000', // Local Dev
         'https://9b90be51bd86.ngrok-free.app', // Ngrok tunnel
+        'https://wapzen.io', // Production domain
         // Add production domains here if needed
       ];
 
