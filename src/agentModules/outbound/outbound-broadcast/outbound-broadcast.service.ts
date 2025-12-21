@@ -28,20 +28,28 @@ import { ConversationService } from 'src/agentModules/conversation/conversation.
 /* -------------------------------------------------------------------------- */
 /*                         GAP-BASED SENDING (NO BATCH)                        */
 /* -------------------------------------------------------------------------- */
-const DEFAULT_MESSAGE_GAP_SECONDS = 120;
+const DEFAULT_MESSAGE_GAP_SECONDS = 120; // fallback, not used for progressive timing
 const DEFAULT_ACK_TIMEOUT_MS = 90_000; // 90s
+
+/**
+ * Progressive delay pattern to avoid WhatsApp AI detection.
+ * Cycles through 1-5 minute delays: 1 min -> 2 min -> 3 min -> 4 min -> 5 min -> repeat
+ * Average delay = 3 minutes, allowing ~480 messages in 24 hours at steady rate
+ * With daily active hours ~16-20 hours, this supports ~1000+ messages/day
+ */
+const PROGRESSIVE_DELAYS_SECONDS = [60, 120, 180, 240, 300]; // 1, 2, 3, 4, 5 minutes
 
 type RenderableTemplate =
   | {
-      id: string;
-      name: string;
-      body: string;
-      variables?: string[] | null;
-      mediaType?: TemplateMediaType | null;
-      mediaData?: Uint8Array | Buffer | null;
-      mediaMimeType?: string | null;
-      mediaFileName?: string | null;
-    }
+    id: string;
+    name: string;
+    body: string;
+    variables?: string[] | null;
+    mediaType?: TemplateMediaType | null;
+    mediaData?: Uint8Array | Buffer | null;
+    mediaMimeType?: string | null;
+    mediaFileName?: string | null;
+  }
   | null;
 
 /* -------------------------------------------------------------------------- */
@@ -75,11 +83,14 @@ export class OutboundBroadcastService {
   /** Prevent overlapping passes for same broadcast */
   private readonly inFlight = new Set<string>();
 
+  /** Track message count per broadcast for progressive delay cycling */
+  private readonly broadcastMessageIndex = new Map<string, number>();
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly whatsapp: WhatsappService,
     private readonly conversations: ConversationService,
-  ) {}
+  ) { }
 
   /* -------------------------------------------------------------------------- */
   /*                                PUBLIC API                                  */
@@ -155,7 +166,7 @@ export class OutboundBroadcastService {
     const next =
       dueNow
         ? { status: BroadcastStatus.RUNNING, camp: OutboundCampaignStatus.RUNNING }
-        : { status: BroadcastStatus.READY,   camp: OutboundCampaignStatus.SCHEDULED };
+        : { status: BroadcastStatus.READY, camp: OutboundCampaignStatus.SCHEDULED };
 
     const updated = await this.prisma.broadcast.update({
       where: { id: b.id },
@@ -564,8 +575,8 @@ export class OutboundBroadcastService {
         }
 
         const lastAttemptAt = await this.getLastAttemptAt(b.outboundCampaignId);
-        const gapMs = (b.messageGapSeconds ?? DEFAULT_MESSAGE_GAP_SECONDS) * 1000;
-        if (lastAttemptAt && Date.now() - lastAttemptAt.getTime() < gapMs) {
+        const progressiveGapMs = this.getProgressiveDelayMs(b.id);
+        if (lastAttemptAt && Date.now() - lastAttemptAt.getTime() < progressiveGapMs) {
           continue;
         }
 
@@ -616,8 +627,8 @@ export class OutboundBroadcastService {
       }
 
       const lastAttemptAt = await this.getLastAttemptAt(campaignId);
-      const gapSec = broadcast.messageGapSeconds ?? DEFAULT_MESSAGE_GAP_SECONDS;
-      if (lastAttemptAt && Date.now() - lastAttemptAt.getTime() < gapSec * 1000) {
+      const progressiveGapMs = this.getProgressiveDelayMs(broadcast.id);
+      if (lastAttemptAt && Date.now() - lastAttemptAt.getTime() < progressiveGapMs) {
         return {
           processed: 0,
           sent: 0,
@@ -689,13 +700,13 @@ export class OutboundBroadcastService {
 
         const sendPromise = media
           ? this.whatsappSendMedia(
-              agentId,
-              lead.phoneNumber!,
-              media.mimeType,
-              media.data,
-              media.filename,
-              media.caption,
-            )
+            agentId,
+            lead.phoneNumber!,
+            media.mimeType,
+            media.data,
+            media.filename,
+            media.caption,
+          )
           : this.whatsappSendText(agentId, lead.phoneNumber!, text);
 
         await this.withTimeout(sendPromise, DEFAULT_ACK_TIMEOUT_MS, 'ACK_TIMEOUT');
@@ -703,7 +714,7 @@ export class OutboundBroadcastService {
         // ✅ conversation log payload — WIDEN TYPE to allow metadata
         const payload: any = {
           agentId,
-          senderJid: lead.phoneNumber+'@s.whatsapp.net'!, // or `${digits}@s.whatsapp.net`
+          senderJid: lead.phoneNumber + '@s.whatsapp.net'!, // or `${digits}@s.whatsapp.net`
           senderType: SenderType.AI,
           message: media ? (media.caption ?? text) : text,
           metadata: {
@@ -714,11 +725,11 @@ export class OutboundBroadcastService {
             templateId: template?.id ?? null,
             media: media
               ? {
-                  mimeType: media.mimeType,
-                  filename: media.filename,
-                  size: media.data?.length ?? undefined,
-                  hasMedia: true,
-                }
+                mimeType: media.mimeType,
+                filename: media.filename,
+                size: media.data?.length ?? undefined,
+                hasMedia: true,
+              }
               : { hasMedia: false },
           },
         };
@@ -737,7 +748,10 @@ export class OutboundBroadcastService {
         });
 
         sent += 1;
-        this.logger.log(`[SEND OK] campaign=${campaignId} to=${lead.phoneNumber}`);
+        // Advance the progressive delay index after successful send
+        this.advanceProgressiveDelayIndex(broadcast.id);
+        const nextDelaySec = this.getProgressiveDelaySeconds(broadcast.id);
+        this.logger.log(`[SEND OK] campaign=${campaignId} to=${lead.phoneNumber} | next delay=${nextDelaySec}s`);
       } catch (err: any) {
         const terminal = attemptsIncludingThis >= maxAttempts;
         await this.prisma.outboundLead.update({
@@ -873,11 +887,11 @@ export class OutboundBroadcastService {
     caption: string,
   ):
     | {
-        mimeType: string;
-        data: Buffer;
-        filename: string;
-        caption: string;
-      }
+      mimeType: string;
+      data: Buffer;
+      filename: string;
+      caption: string;
+    }
     | null {
     if (
       template &&
@@ -975,6 +989,35 @@ export class OutboundBroadcastService {
       updatedAt: true,
       createdAt: true,
     } as const;
+  }
+
+  /* -------------------------------------------------------------------------- */
+  /*                          PROGRESSIVE DELAY HELPERS                          */
+  /* -------------------------------------------------------------------------- */
+
+  /**
+   * Get the current delay in milliseconds for a broadcast based on its message index.
+   * Cycles through: 1 min (60s), 2 min (120s), 3 min (180s), 4 min (240s), 5 min (300s)
+   */
+  private getProgressiveDelayMs(broadcastId: string): number {
+    return this.getProgressiveDelaySeconds(broadcastId) * 1000;
+  }
+
+  /**
+   * Get the current delay in seconds for a broadcast based on its message index.
+   */
+  private getProgressiveDelaySeconds(broadcastId: string): number {
+    const index = this.broadcastMessageIndex.get(broadcastId) ?? 0;
+    return PROGRESSIVE_DELAYS_SECONDS[index % PROGRESSIVE_DELAYS_SECONDS.length];
+  }
+
+  /**
+   * Advance the message index for progressive delay cycling.
+   * Called after each successful message send.
+   */
+  private advanceProgressiveDelayIndex(broadcastId: string): void {
+    const currentIndex = this.broadcastMessageIndex.get(broadcastId) ?? 0;
+    this.broadcastMessageIndex.set(broadcastId, currentIndex + 1);
   }
 
   private escapeRegExp(s: string) {
