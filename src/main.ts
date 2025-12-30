@@ -4,6 +4,7 @@ import { AppModule } from './app.module';
 import { Logger, ValidationPipe } from '@nestjs/common';
 
 async function bootstrap() {
+  // Force restart to load env vars
   // 1. Create the app WITHOUT passing { cors: ... } here.
   // We will handle CORS manually below.
   const app = await NestFactory.create(AppModule);
