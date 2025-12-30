@@ -10,14 +10,16 @@ export class GoogleApiService {
   // CORRECTED: Use the imported OAuth2Client type directly.
   private oauthClient: OAuth2Client;
 
-  constructor() {
-    const clientId = '1005621406349-kamen9nl3j7bh7r9rp0acu98m6ka6l71.apps.googleusercontent.com'
-    const clientSecret = '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'
-    const redirectUri =  'http://localhost:3001/google'
+  constructor(private readonly configService: ConfigService) {
+    const clientId = this.configService.get<string>('GOOGLE_CLIENT_ID');
+    const clientSecret = this.configService.get<string>('GOOGLE_CLIENT_SECRET');
+    const redirectUri = this.configService.get<string>('GOOGLE_REDIRECT_URI');
 
-    console.log('clie', clientId, clientSecret, redirectUri)
+    if (!clientId || !clientSecret || !redirectUri) {
+      throw new Error('Google OAuth credentials are not configured in environment variables');
+    }
 
-    
+    this.logger.log(`Initializing Google OAuth with client: ${clientId}`);
 
     this.oauthClient = new google.auth.OAuth2(
       clientId,
@@ -37,7 +39,7 @@ export class GoogleApiService {
       'https://www.googleapis.com/auth/userinfo.profile',
     ];
 
-    
+
 
     return this.oauthClient.generateAuthUrl({
       access_type: 'offline', // Required to get a refresh token

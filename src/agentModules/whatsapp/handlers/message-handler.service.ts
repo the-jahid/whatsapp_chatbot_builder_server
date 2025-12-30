@@ -24,7 +24,7 @@ export class MessageHandlerService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly runAgent: RunAgentService,
-  ) {}
+  ) { }
 
   /**
    * Main handler for incoming WhatsApp messages (text or voice).
@@ -32,8 +32,11 @@ export class MessageHandlerService {
    * - Replies with text and (if available) TTS audio.
    */
   public async handleMessage(socket: WASocket, msg: WAMessage, agentId: string): Promise<void> {
-    const senderJid = msg.key.remoteJid;
-    if (!senderJid || msg.key.fromMe || senderJid === 'status@broadcast') return;
+    const rawSenderJid = msg.key.remoteJid;
+    if (!rawSenderJid || msg.key.fromMe || rawSenderJid === 'status@broadcast') return;
+
+    // Normalize senderJid to remove "+" prefix
+    const senderJid = this.normalizeSenderJid(rawSenderJid);
 
     // Extract text if any (from many possible message shapes)
     let incomingText = this.extractText(msg);
@@ -86,8 +89,8 @@ export class MessageHandlerService {
           ? await this.loadHistoryAsLCMsgs(agent.id, senderJid, historyLimit)
           : [];
 
-      // Run the agent with history
-      const aiText = await this.runAgent.runAgent(incomingText, history, null, agent.id);
+      // Run the agent with history (pass senderJid for lead capture)
+      const aiText = await this.runAgent.runAgent(incomingText, history, null, agent.id, senderJid);
 
       // Persist AI message
       await this.prisma.conversation.create({
@@ -125,6 +128,16 @@ export class MessageHandlerService {
   /* ------------------------------------------------------------------------ */
   /*                                Helpers                                   */
   /* ------------------------------------------------------------------------ */
+
+  /**
+   * Normalize WhatsApp JID by removing the "+" prefix from phone numbers.
+   * Example: "+8801701750469@s.whatsapp.net" -> "8801701750469@s.whatsapp.net"
+   */
+  private normalizeSenderJid(jid: string): string {
+    if (!jid) return jid;
+    // Remove "+" from the beginning if present
+    return jid.replace(/^\+/, '');
+  }
 
   /**
    * Extract a readable text from a Baileys WAMessage.
@@ -208,7 +221,7 @@ export class MessageHandlerService {
   private clampHistoryLimit(value?: number): number {
     const v = Number.isFinite(value as number) ? (value as number) : 20;
     return Math.max(1, Math.min(v, 100));
-    }
+  }
 
   /* ---------------------------- Voice helpers ---------------------------- */
 

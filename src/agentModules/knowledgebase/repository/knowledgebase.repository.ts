@@ -39,7 +39,8 @@ const PINECONE_HOST = process.env.PINECONE_HOST!;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY!;
 
 const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || 'text-embedding-3-large';
-const EMBEDDING_DIMENSIONS = Number(process.env.EMBEDDING_DIMENSIONS || 3072);
+const envDims = Number(process.env.EMBEDDING_DIMENSIONS);
+const EMBEDDING_DIMENSIONS = (!isNaN(envDims) && envDims > 0) ? envDims : 3072;
 
 if (!PINECONE_API_KEY) throw new Error('Missing PINECONE_API_KEY');
 if (!PINECONE_INDEX_NAME) throw new Error('Missing PINECONE_INDEX_NAME');
@@ -50,9 +51,7 @@ if (!PINECONE_HOST) {
 }
 if (!OPENAI_API_KEY) throw new Error('Missing OPENAI_API_KEY');
 
-/* ===========================
- * Clients (Pinecone v2 + OpenAI)
- * =========================== */
+// ... (rest of clients setup)
 const pc = new Pinecone({ apiKey: PINECONE_API_KEY });
 const index = pc.index(PINECONE_INDEX_NAME);
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
@@ -218,7 +217,7 @@ async function extractTextFromFile(params: {
   // 2) DOCX
   if (
     mimeType ===
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
     ext === 'docx'
   ) {
     const mammoth: any = await requireOptional('mammoth');
@@ -236,7 +235,7 @@ async function extractTextFromFile(params: {
   // 4) XLSX/XLS → CSV stringify
   if (
     mimeType ===
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
     mimeType === 'application/vnd.ms-excel' ||
     ext === 'xlsx' ||
     ext === 'xls'
@@ -264,7 +263,7 @@ async function extractTextFromFile(params: {
  * ============================================================ */
 @Injectable()
 export class KnowledgebaseRepository implements IKnowledgebaseRepository {
-  constructor(private prisma: PrismaService) {}
+  constructor(private prisma: PrismaService) { }
 
   /* ---------- KB ---------- */
 
@@ -273,7 +272,7 @@ export class KnowledgebaseRepository implements IKnowledgebaseRepository {
       where: { agentId },
       update: {},
       create: {
-        agentId,
+        agent: { connect: { id: agentId } },
         embeddingModel: EMBEDDING_MODEL,
         embeddingDimensions: EMBEDDING_DIMENSIONS,
       },
@@ -654,12 +653,12 @@ export class KnowledgebaseRepository implements IKnowledgebaseRepository {
       ...(query.tag ? { tags: { has: query.tag } } : {}),
       ...(query.q
         ? {
-            OR: [
-              { title: { contains: query.q, mode: 'insensitive' } },
-              { content: { contains: query.q, mode: 'insensitive' } },
-              { tags: { has: query.q } },
-            ],
-          }
+          OR: [
+            { title: { contains: query.q, mode: 'insensitive' } },
+            { content: { contains: query.q, mode: 'insensitive' } },
+            { tags: { has: query.q } },
+          ],
+        }
         : {}),
     };
 

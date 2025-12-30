@@ -41,7 +41,7 @@ export class RunAgentService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly kb: KnowledgebaseService,
-  ) {}
+  ) { }
 
   /**
    * Main agent execution method with optimized token usage
@@ -51,6 +51,7 @@ export class RunAgentService {
     chat_history: BaseMessage[],
     systemPrompt: string | null,
     agentId: string,
+    senderJid?: string,
   ): Promise<string> {
     try {
       this.logger.log(`[runAgent] agentId=${agentId}`);
@@ -62,6 +63,7 @@ export class RunAgentService {
 
       const timezone = agentRecord.bookingSettings?.timezone || 'UTC';
       this.logger.log(`[runAgent] tz=${timezone}`);
+      this.logger.log(`[runAgent] isLeadsActive=${agentRecord.isLeadsActive}, leadItems=${agentRecord.leadItems?.length ?? 0}`);
 
       // Initialize LLM
       const llm = new ChatOpenAI({
@@ -70,8 +72,8 @@ export class RunAgentService {
         temperature: 0,
       });
 
-      // Build tools array
-      const tools = await this.buildTools(agentRecord, agentId);
+      // Build tools array (pass senderJid for lead capture)
+      const tools = await this.buildTools(agentRecord, agentId, senderJid);
 
       // Optimize chat history to reduce tokens
       const optimizedHistory = this.optimizeChatHistory(chat_history);
@@ -124,6 +126,7 @@ export class RunAgentService {
   private async buildTools(
     agentRecord: AgentWithLeadItems,
     agentId: string,
+    senderJid?: string,
   ): Promise<ToolInterface[]> {
     const tools: ToolInterface[] = [];
 
@@ -131,9 +134,13 @@ export class RunAgentService {
     tools.push(this.buildSearchKnowledgebaseTool(agentId));
 
     // 2. Lead capture tool (conditional)
+    this.logger.log(`[buildTools] Lead check: isLeadsActive=${agentRecord.isLeadsActive}, leadItemsCount=${agentRecord.leadItems?.length ?? 0}`);
     if (agentRecord.isLeadsActive && agentRecord.leadItems?.length > 0) {
-      const leadTool = this.buildLeadTool(agentRecord, agentId);
+      this.logger.log(`[buildTools] Adding lead collection tool...`);
+      const leadTool = this.buildLeadTool(agentRecord, agentId, senderJid);
       if (leadTool) tools.push(leadTool);
+    } else {
+      this.logger.log(`[buildTools] Lead collection tool SKIPPED (disabled or no fields)`);
     }
 
     // 3. Appointment tools (conditional)
@@ -146,7 +153,7 @@ export class RunAgentService {
       tools.push(...(apptTools as unknown as ToolInterface[]));
     }
 
-    this.logger.log(`[buildTools] ${tools.length} tools enabled`);
+    this.logger.log(`[buildTools] ${tools.length} tools enabled: ${tools.map(t => t.name).join(', ')}`);
     return tools;
   }
 
@@ -156,6 +163,7 @@ export class RunAgentService {
   private buildLeadTool(
     agentRecord: AgentWithLeadItems,
     agentId: string,
+    senderJid?: string,
   ): ToolInterface | null {
     try {
       const fieldsForTool = agentRecord.leadItems.map((item) => ({
@@ -168,6 +176,7 @@ export class RunAgentService {
         prisma: this.prisma,
         agentId,
         logger: this.logger,
+        senderPhone: senderJid,
       });
 
       this.logger.log(`[buildLeadTool] ${fieldsForTool.length} fields`);
@@ -219,14 +228,14 @@ export class RunAgentService {
           // Build compact results
           const compact: CompactKBResult[] = matches.slice(0, topK).map((m, idx) => {
             const mm: any = m;
-            
+
             // Extract text content from various possible fields
             const textCandidate =
               typeof mm.content === 'string' ? mm.content :
-              typeof mm.text === 'string' ? mm.text :
-              typeof mm.snippet === 'string' ? mm.snippet :
-              typeof mm.metadata?.content === 'string' ? mm.metadata.content :
-              JSON.stringify(mm.metadata ?? {});
+                typeof mm.text === 'string' ? mm.text :
+                  typeof mm.snippet === 'string' ? mm.snippet :
+                    typeof mm.metadata?.content === 'string' ? mm.metadata.content :
+                      JSON.stringify(mm.metadata ?? {});
 
             // Truncate to max length
             const text =
@@ -268,7 +277,7 @@ export class RunAgentService {
     agentRecord: AgentWithLeadItems,
   ): string {
     const base = basePrompt || 'You are a helpful assistant.';
-    
+
     const sections: string[] = [
       `# Context\nTZ: ${timezone}. All times use this TZ.`,
       '\n# Rules',
@@ -277,23 +286,48 @@ export class RunAgentService {
       '3. Never fabricate KB content',
     ];
 
-    // Add lead instructions if enabled
+    // Add lead instructions if enabled, or explicitly disable if not
     if (agentRecord.isLeadsActive && agentRecord.leadItems?.length > 0) {
       sections.push(
         '\n# Leads',
-        'Call "get_lead_fields" → ask each → "submit_lead_answers" with all answers',
-        'If fails: ask missing fields only',
+        'Call "collect_information" tool to gather lead data from user',
+        'Ask for each field one by one in a conversational manner',
+        'Only call the tool when you have collected ALL required information',
+      );
+    } else {
+      // IMPORTANT: Explicitly tell AI not to collect leads when feature is disabled
+      sections.push(
+        '\n# Lead Collection - DISABLED',
+        'Lead collection is currently DISABLED for this agent.',
+        'DO NOT attempt to collect any personal information or lead data from users.',
+        'If a user asks to add a lead or provide their information, politely inform them that lead collection is not available at this time.',
+        'Do NOT ask for name, email, phone, age, or any other personal details for lead purposes.',
       );
     }
 
     // Add booking instructions if enabled
     if (agentRecord.isBookingActive) {
       sections.push(
-        '\n# Booking',
-        '"get_available_time" (no day) → show dates → call again (with day) → slots',
-        '"get_appointment_intake_fields" → ask each → use as "intakeAnswers"',
-        'Confirm → "book_appointment_tool"',
-        'Keep leads separate from booking intake',
+        '\n# Appointment Booking - IMPORTANT',
+        'When a user wants to book an appointment, follow these steps IN ORDER:',
+        '',
+        'STEP 1: Show Available Dates',
+        '- Call "get_available_time" WITHOUT any arguments to get available dates',
+        '- Present the dates to the user and ask them to choose one',
+        '',
+        'STEP 2: Show Time Slots',
+        '- After user picks a date, call "get_available_time" WITH {{"day":"YYYY-MM-DD"}}',
+        '- Present the time slots and ask user to choose one',
+        '',
+        'STEP 3: Book the Appointment',
+        '- Once the user selects a time, IMMEDIATELY call "book_appointment_tool"',
+        '- CRITICAL: You MUST call the tool with a flattened JSON object:',
+        '  {{"startUtc":"...","endUtc":"..."}}',
+        '- DO NOT just tell the user the appointment is booked - you MUST call the tool!',
+        '- After calling, the tool will return confirmation',
+        '- Then tell the user their appointment is successfully booked',
+        '',
+        'NEVER say "I cannot book" or "there was an error" without actually calling the tool first!',
       );
     }
 
@@ -314,7 +348,7 @@ export class RunAgentService {
     this.logger.log(
       `[optimizeHistory] Reduced ${messages.length} → ${recent.length} messages`,
     );
-    
+
     return recent;
   }
 

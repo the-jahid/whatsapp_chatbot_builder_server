@@ -36,7 +36,7 @@ import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 export class BookingSettingsService {
   private readonly logger = new Logger(BookingSettingsService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) { }
 
   // ---------- Booking Settings ----------
 

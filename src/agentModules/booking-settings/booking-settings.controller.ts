@@ -56,7 +56,7 @@ export class BookingSettingsController {
   constructor(
     private readonly booking: BookingSettingsService,
     private readonly userService: UserService,
-  ) {}
+  ) { }
 
   // ---------- Booking Settings ----------
 

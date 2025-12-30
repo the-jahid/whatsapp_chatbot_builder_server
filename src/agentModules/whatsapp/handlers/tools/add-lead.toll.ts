@@ -22,7 +22,9 @@ interface CreateDataCollectionToolParams {
   agentId: string;
   logger: Logger;
   /** The dynamic fields from the database that define the questions to ask. */
-  fields: DynamicField[]; 
+  fields: DynamicField[];
+  /** WhatsApp phone number of the user who is submitting this lead */
+  senderPhone?: string;
 }
 
 /**
@@ -34,6 +36,7 @@ export function createDynamicDataCollectionTool({
   agentId,
   logger,
   fields,
+  senderPhone,
 }: CreateDataCollectionToolParams): DynamicTool {
   try {
     const toolName = 'collect_information';
@@ -84,6 +87,7 @@ IMPORTANT:
               agentId,
               status: 'NEW',
               source: 'AI Dynamic Form',
+              senderPhone: senderPhone || null,
               data: validatedData as Prisma.JsonObject,
             },
           });

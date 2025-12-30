@@ -712,9 +712,11 @@ export class OutboundBroadcastService {
         await this.withTimeout(sendPromise, DEFAULT_ACK_TIMEOUT_MS, 'ACK_TIMEOUT');
 
         // ✅ conversation log payload — WIDEN TYPE to allow metadata
+        // Normalize phone number by removing + prefix
+        const normalizedPhone = lead.phoneNumber!.replace(/^\+/, '');
         const payload: any = {
           agentId,
-          senderJid: lead.phoneNumber + '@s.whatsapp.net'!, // or `${digits}@s.whatsapp.net`
+          senderJid: normalizedPhone + '@s.whatsapp.net',
           senderType: SenderType.AI,
           message: media ? (media.caption ?? text) : text,
           metadata: {

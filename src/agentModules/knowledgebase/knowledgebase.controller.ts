@@ -42,7 +42,7 @@ import type {
  *
  * Pinecone namespace = agentId
  */
-@UseGuards(ClerkAuthGuard)
+// @UseGuards(ClerkAuthGuard)
 @Controller('agents/:agentId/knowledgebase')
 export class KnowledgebaseController {
   constructor(private readonly service: KnowledgebaseService) {}
