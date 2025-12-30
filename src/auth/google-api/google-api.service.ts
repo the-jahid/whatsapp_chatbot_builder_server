@@ -33,6 +33,10 @@ export class GoogleApiService {
    * @returns The authorization URL.
    */
   getAuthUrl(): string {
+    console.log('=== GOOGLE AUTH URL CALLED ===');
+    console.log('GOOGLE_CLIENT_ID:', this.configService.get<string>('GOOGLE_CLIENT_ID'));
+    console.log('==============================');
+
     const scopes = [
       'https://www.googleapis.com/auth/calendar',
       'https://www.googleapis.com/auth/userinfo.email',
@@ -41,11 +45,16 @@ export class GoogleApiService {
 
 
 
-    return this.oauthClient.generateAuthUrl({
+    const url = this.oauthClient.generateAuthUrl({
       access_type: 'offline', // Required to get a refresh token
       prompt: 'consent', // Ensures the user is always prompted for consent
       scope: scopes,
     });
+
+    console.log('GENERATED AUTH URL:', url);
+    console.log('==============================');
+
+    return url;
   }
 
   /**

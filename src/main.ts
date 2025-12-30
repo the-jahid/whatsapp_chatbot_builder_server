@@ -14,11 +14,16 @@ async function bootstrap() {
   app.enableCors({
     origin: (requestOrigin, callback) => {
       const allowedOrigins = [
-        'http://localhost:3001', // Your Frontend
-        'http://localhost:3000', // Local Dev
-        'https://9b90be51bd86.ngrok-free.app', // Ngrok tunnel
-        'https://wapzen.io', // Production domain
-        // Add production domains here if needed
+        'http://localhost:3001',
+        'http://localhost:3000',
+        'https://wapzen.io',
+        'https://www.wapzen.io',
+        'https://9b90be51bd86.ngrok-free.app',
+      ];
+
+      // Allow subdomains for production
+      const allowedPatterns = [
+        /^https:\/\/.*\.wapzen\.io$/,
       ];
 
       // Allow requests with no origin (like mobile apps or curl requests)
@@ -26,12 +31,10 @@ async function bootstrap() {
         return callback(null, true);
       }
 
-      if (allowedOrigins.includes(requestOrigin)) {
-        // If the origin is in our list, allow it
+      if (allowedOrigins.includes(requestOrigin) || allowedPatterns.some(pattern => pattern.test(requestOrigin))) {
         callback(null, true);
       } else {
-        // Optional: Log blocked origins for debugging
-        Logger.warn(`Blocked CORS request from: ${requestOrigin}`);
+        Logger.warn(`[CORS] Blocked request from: ${requestOrigin}`);
         callback(new Error('Not allowed by CORS'));
       }
     },
