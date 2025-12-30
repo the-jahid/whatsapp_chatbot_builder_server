@@ -1,4 +1,5 @@
-import {  Module} from '@nestjs/common';
+import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
 import { UserModule } from './user/user.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { ClerkModule } from './clerk/clerk.module';
@@ -27,28 +28,29 @@ import { KnowledgebaseModule } from './agentModules/knowledgebase/knowledgebase.
 @Module({
 
   imports: [
-     PrismaModule,
-     UserModule,
-     ClerkModule,
-     AgentModule,
-     WhatsappModule,
-     ConversationModule,
-     LeadItemModule,
-     LeadModule,
-     GoogleApiModule,
-     GoogleAuthModule,
-     CalendarConnectionModule,
-     BookingSettingsModule,
-     AppointmentLeadItemModule,
-     LeadCustomFieldIntakeModule, 
-     OutboundLeadModule,
-     OutboundTemplateModule,
+    ConfigModule.forRoot({ isGlobal: true }),
+    PrismaModule,
+    UserModule,
+    ClerkModule,
+    AgentModule,
+    WhatsappModule,
+    ConversationModule,
+    LeadItemModule,
+    LeadModule,
+    GoogleApiModule,
+    GoogleAuthModule,
+    CalendarConnectionModule,
+    BookingSettingsModule,
+    AppointmentLeadItemModule,
+    LeadCustomFieldIntakeModule,
+    OutboundLeadModule,
+    OutboundTemplateModule,
     OutboundCampaignModule,
     OutboundBroadcastModule,
     KnowledgebaseModule,
-     ScheduleModule.forRoot()
-    ],
+    ScheduleModule.forRoot()
+  ],
   providers: []
 })
 
-export class AppModule {}
+export class AppModule { }
