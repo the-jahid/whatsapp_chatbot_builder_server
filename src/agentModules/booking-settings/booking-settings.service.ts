@@ -30,7 +30,8 @@ import {
 } from './schema/weekly_availability.schema';
 
 import { Prisma } from '@prisma/client';
-import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
+
+const PrismaClientKnownRequestError = Prisma.PrismaClientKnownRequestError;
 
 @Injectable()
 export class BookingSettingsService {

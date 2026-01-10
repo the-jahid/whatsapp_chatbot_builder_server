@@ -23,6 +23,8 @@ import { OutboundCampaignModule } from './agentModules/outbound/outbound-campaig
 import { OutboundTemplateModule } from './agentModules/outbound-template/outbound-template.module';
 import { OutboundBroadcastModule } from './agentModules/outbound/outbound-broadcast/outbound-broadcast.module';
 import { KnowledgebaseModule } from './agentModules/knowledgebase/knowledgebase.module';
+import { FreeToolsModule } from './free-tools/free-tools.module';
+import { BlogModule } from './blog/blog.module';
 
 
 @Module({
@@ -48,6 +50,8 @@ import { KnowledgebaseModule } from './agentModules/knowledgebase/knowledgebase.
     OutboundCampaignModule,
     OutboundBroadcastModule,
     KnowledgebaseModule,
+    FreeToolsModule,
+    BlogModule,
     ScheduleModule.forRoot()
   ],
   providers: []

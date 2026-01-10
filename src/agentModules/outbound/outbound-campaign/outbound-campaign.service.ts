@@ -5,7 +5,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { OutboundCampaignStatus, PrismaClient } from '@prisma/client';
+import { OutboundCampaignStatus, PrismaClient, Prisma } from '@prisma/client';
 import { ZodError } from 'zod';
 
 import {
@@ -22,14 +22,14 @@ import type {
 } from './interface';
 import { OutboundCampaignRepository } from './repository/outbound-campaign.repository';
 
-// Prisma error type import (supported on recent Prisma versions)
-import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
+// Prisma error type
+const PrismaClientKnownRequestError = Prisma.PrismaClientKnownRequestError;
 
 @Injectable()
 export class OutboundCampaignService {
   private readonly logger = new Logger(OutboundCampaignService.name);
 
-  constructor(private readonly repo: OutboundCampaignRepository) {}
+  constructor(private readonly repo: OutboundCampaignRepository) { }
 
   /* ----------------------------- Helpers ----------------------------- */
 

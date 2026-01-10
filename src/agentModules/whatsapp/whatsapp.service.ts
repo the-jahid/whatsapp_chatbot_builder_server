@@ -183,7 +183,7 @@ export class WhatsappService implements OnModuleInit {
     for (const agent of activeAgents) {
       const session = await this.prisma.whatsapp.findUnique({ where: { agentId: agent.id } });
       if (session && session.sessionData) {
-        this.start(agent.id).catch(() => {});
+        this.start(agent.id).catch(() => { });
       }
     }
   }
@@ -551,7 +551,7 @@ export class WhatsappService implements OnModuleInit {
             }
 
             if (!c.paused) {
-              setTimeout(() => this.start(agentId).catch(() => {}), 5000);
+              setTimeout(() => this.start(agentId).catch(() => { }), 5000);
             }
           } else if (connection === 'open') {
             c.status = 'open';
@@ -591,7 +591,7 @@ export class WhatsappService implements OnModuleInit {
               await socket.sendMessage(msg.key.remoteJid!, {
                 text: 'Sorry, I encountered an error. Please try again later.',
               });
-            } catch {}
+            } catch { }
           }
         });
       } catch (error: any) {
@@ -769,7 +769,7 @@ export class WhatsappService implements OnModuleInit {
             }
 
             if (!c.paused) {
-              setTimeout(() => this.startWithPhone(agentId, phoneNumber).catch(() => {}), 5000);
+              setTimeout(() => this.startWithPhone(agentId, phoneNumber).catch(() => { }), 5000);
             }
           } else if (connection === 'open') {
             c.status = 'open';
@@ -810,7 +810,7 @@ export class WhatsappService implements OnModuleInit {
               await socket.sendMessage(msg.key.remoteJid!, {
                 text: 'Sorry, I encountered an error. Please try again later.',
               });
-            } catch {}
+            } catch { }
           }
         });
 
@@ -875,7 +875,7 @@ export class WhatsappService implements OnModuleInit {
     } else {
       const conn = this.connections.get(agentId);
       if (!conn || conn.status !== 'open') {
-        await this.start(agentId).catch(() => {});
+        await this.start(agentId).catch(() => { });
       } else {
         conn.paused = false;
       }
@@ -933,12 +933,52 @@ export class WhatsappService implements OnModuleInit {
     } else {
       const c = this.connections.get(agentId);
       if (!c || c.status !== 'open') {
-        await this.start(agentId).catch(() => {});
+        await this.start(agentId).catch(() => { });
       } else {
         c.paused = false;
       }
       const c2 = this.ensureConn(agentId);
       return { isActive: true, status: c2.status, paused: !!c2.paused };
+    }
+  }
+
+  /* ------------------------------------------------------------------------ */
+  /*                         Number Checker (Free Tools)                      */
+  /* ------------------------------------------------------------------------ */
+
+  /**
+   * Check if a phone number is registered on WhatsApp using an agent's session
+   */
+  async checkNumberOnWhatsApp(
+    agentId: string,
+    phoneNumber: string,
+  ): Promise<{ exists: boolean; jid?: string }> {
+    const conn = this.connections.get(agentId);
+    if (!conn || !conn.socket || conn.status !== 'open') {
+      throw new BadRequestException(
+        `Agent ${agentId} is not connected to WhatsApp. Please ensure the agent is logged in.`,
+      );
+    }
+
+    const socket = conn.socket;
+    const digitsOnly = phoneNumber.replace(/\D/g, '');
+    const jid = `${digitsOnly}@s.whatsapp.net`;
+
+    try {
+      if (typeof (socket as any).onWhatsApp === 'function') {
+        const results = await (socket as any).onWhatsApp(jid);
+        if (Array.isArray(results) && results.length > 0) {
+          const result = results[0];
+          if (result && result.exists) {
+            return { exists: true, jid: result.jid };
+          }
+        }
+        return { exists: false };
+      }
+      throw new BadRequestException('onWhatsApp function not available on socket');
+    } catch (error: any) {
+      if (error instanceof BadRequestException) throw error;
+      throw new BadRequestException(`Failed to check number: ${error.message}`);
     }
   }
 
@@ -961,7 +1001,7 @@ export class WhatsappService implements OnModuleInit {
     if (conn.socket) {
       try {
         conn.socket.end(new Error('paused-by-admin'));
-      } catch {}
+      } catch { }
     }
     conn.status = 'close';
     conn.qr = undefined;

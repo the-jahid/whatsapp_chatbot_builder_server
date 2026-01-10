@@ -30,7 +30,8 @@ import { DeleteWeeklyAvailabilityDto } from './dto/delete-weekly-availability.dt
 
 import { ZodError } from 'zod';
 import { Prisma } from '@prisma/client';
-import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
+
+const PrismaClientKnownRequestError = Prisma.PrismaClientKnownRequestError;
 
 import { ClerkAuthGuard } from 'src/auth/clerk-auth.guard';
 import { UserService } from 'src/user/services/user.service';

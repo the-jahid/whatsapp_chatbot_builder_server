@@ -4,9 +4,6 @@ import path from "node:path";
 import { defineConfig, env } from "prisma/config";
 
 export default defineConfig({
-  // required when using datasource in config (and for Prisma 7)
-  engine: "classic",
-
   // where your schema file lives
   schema: path.join("prisma", "schema.prisma"),
 

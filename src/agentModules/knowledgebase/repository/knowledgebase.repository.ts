@@ -30,31 +30,57 @@ import type {
 const log = new Logger('KnowledgebaseRepository');
 
 /* ===========================
- * ENV
+ * ENV (lazy getters to ensure .env is loaded first)
  * =========================== */
-const PINECONE_API_KEY = process.env.PINECONE_API_KEY!;
-const PINECONE_INDEX_NAME = process.env.PINECONE_INDEX_NAME!;
-/** Data-plane host, e.g. https://myindex-xxxx.svc.us-east1-gcp.pinecone.io */
-const PINECONE_HOST = process.env.PINECONE_HOST!;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY!;
+const getEnvVar = (name: string, required = true): string => {
+  const value = process.env[name];
+  if (required && !value) {
+    throw new Error(`Missing ${name}`);
+  }
+  return value || '';
+};
 
-const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || 'text-embedding-3-large';
-const envDims = Number(process.env.EMBEDDING_DIMENSIONS);
-const EMBEDDING_DIMENSIONS = (!isNaN(envDims) && envDims > 0) ? envDims : 3072;
+const getEmbeddingModel = () => process.env.EMBEDDING_MODEL || 'text-embedding-3-large';
+const getEmbeddingDimensions = () => {
+  const envDims = Number(process.env.EMBEDDING_DIMENSIONS);
+  return (!isNaN(envDims) && envDims > 0) ? envDims : 3072;
+};
 
-if (!PINECONE_API_KEY) throw new Error('Missing PINECONE_API_KEY');
-if (!PINECONE_INDEX_NAME) throw new Error('Missing PINECONE_INDEX_NAME');
-if (!PINECONE_HOST) {
-  throw new Error(
-    'Missing PINECONE_HOST. Set it to your index data-plane URL, e.g. https://<index>-<project>.svc.<region>.pinecone.io'
-  );
+// Lazy-initialized clients
+let _pc: Pinecone | null = null;
+let _index: ReturnType<Pinecone['index']> | null = null;
+let _openai: OpenAI | null = null;
+
+function getPinecone(): Pinecone {
+  if (!_pc) {
+    _pc = new Pinecone({ apiKey: getEnvVar('PINECONE_API_KEY') });
+  }
+  return _pc;
 }
-if (!OPENAI_API_KEY) throw new Error('Missing OPENAI_API_KEY');
 
-// ... (rest of clients setup)
-const pc = new Pinecone({ apiKey: PINECONE_API_KEY });
-const index = pc.index(PINECONE_INDEX_NAME);
-const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+function getIndex() {
+  if (!_index) {
+    _index = getPinecone().index(getEnvVar('PINECONE_INDEX_NAME'));
+  }
+  return _index;
+}
+
+function getOpenAI(): OpenAI {
+  if (!_openai) {
+    _openai = new OpenAI({ apiKey: getEnvVar('OPENAI_API_KEY') });
+  }
+  return _openai;
+}
+
+function getPineconeHost(): string {
+  const host = getEnvVar('PINECONE_HOST');
+  if (!host) {
+    throw new Error(
+      'Missing PINECONE_HOST. Set it to your index data-plane URL, e.g. https://<index>-<project>.svc.<region>.pinecone.io'
+    );
+  }
+  return host;
+}
 
 /* ===========================
  * Helpers
@@ -100,11 +126,11 @@ function chunkText(text: string, chunkSize = 800, overlap = 200): KnowledgeChunk
 
 async function embedBatch(
   texts: string[],
-  model = EMBEDDING_MODEL,
-  dims = EMBEDDING_DIMENSIONS
+  model = getEmbeddingModel(),
+  dims = getEmbeddingDimensions()
 ): Promise<number[][]> {
   if (texts.length === 0) return [];
-  const res = await openai.embeddings.create({ model, input: texts, dimensions: dims });
+  const res = await getOpenAI().embeddings.create({ model, input: texts, dimensions: dims });
   return res.data.map((d) => d.embedding as number[]);
 }
 
@@ -146,11 +172,11 @@ async function pineconeHttpDeleteByIds(params: {
   namespace: string;
   ids: string[];
 }): Promise<void> {
-  const url = `${PINECONE_HOST.replace(/\/+$/, '')}/vectors/delete`;
+  const url = `${getPineconeHost().replace(/\/+$/, '')}/vectors/delete`;
   const res = await fetch(url, {
     method: 'POST',
     headers: {
-      'Api-Key': PINECONE_API_KEY,
+      'Api-Key': getEnvVar('PINECONE_API_KEY'),
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
@@ -273,8 +299,8 @@ export class KnowledgebaseRepository implements IKnowledgebaseRepository {
       update: {},
       create: {
         agent: { connect: { id: agentId } },
-        embeddingModel: EMBEDDING_MODEL,
-        embeddingDimensions: EMBEDDING_DIMENSIONS,
+        embeddingModel: getEmbeddingModel(),
+        embeddingDimensions: getEmbeddingDimensions(),
       },
     });
     return kb as unknown as KnowledgeBase;
@@ -325,9 +351,9 @@ export class KnowledgebaseRepository implements IKnowledgebaseRepository {
   ): Promise<KnowledgeBaseDocument> {
     const kb = await this.ensureKnowledgeBase(agentId);
 
-    const embeddingModel = input.embeddingModel || kb.embeddingModel || EMBEDDING_MODEL;
+    const embeddingModel = input.embeddingModel || kb.embeddingModel || getEmbeddingModel();
     const embeddingDimensions =
-      input.embeddingDimensions || kb.embeddingDimensions || EMBEDDING_DIMENSIONS;
+      input.embeddingDimensions || kb.embeddingDimensions || getEmbeddingDimensions();
 
     const { chunkSize, chunkOverlap } = clampChunking(input.chunkSize, input.chunkOverlap);
     const vectorIdPrefix = input.vectorIdPrefix || `doc_${uuidv4()}`;
@@ -381,7 +407,7 @@ export class KnowledgebaseRepository implements IKnowledgebaseRepository {
       );
 
       if (vectors.length > 0) {
-        await index.namespace(vectorNamespace).upsert(vectors);
+        await getIndex().namespace(vectorNamespace).upsert(vectors);
       }
 
       const updated = await this.prisma.knowledgeBaseDocument.update({
@@ -444,9 +470,9 @@ export class KnowledgebaseRepository implements IKnowledgebaseRepository {
         vectorNamespace: agentId,
         vectorIdPrefix: input.vectorIdPrefix || `doc_${uuidv4()}`,
         vectorCount: 0,
-        embeddingModel: input.embeddingModel || kb.embeddingModel || EMBEDDING_MODEL,
+        embeddingModel: input.embeddingModel || kb.embeddingModel || getEmbeddingModel(),
         embeddingDimensions:
-          input.embeddingDimensions || kb.embeddingDimensions || EMBEDDING_DIMENSIONS,
+          input.embeddingDimensions || kb.embeddingDimensions || getEmbeddingDimensions(),
         chunkSize,
         chunkOverlap,
         tokenCount: null,
@@ -479,9 +505,9 @@ export class KnowledgebaseRepository implements IKnowledgebaseRepository {
   ): Promise<KnowledgeBaseDocument> {
     const kb = await this.ensureKnowledgeBase(agentId);
 
-    const embeddingModel = input.embeddingModel || kb.embeddingModel || EMBEDDING_MODEL;
+    const embeddingModel = input.embeddingModel || kb.embeddingModel || getEmbeddingModel();
     const embeddingDimensions =
-      input.embeddingDimensions || kb.embeddingDimensions || EMBEDDING_DIMENSIONS;
+      input.embeddingDimensions || kb.embeddingDimensions || getEmbeddingDimensions();
     const { chunkSize, chunkOverlap } = clampChunking(input.chunkSize, input.chunkOverlap);
 
     const vectorIdPrefix = input.vectorIdPrefix || `doc_${uuidv4()}`;
@@ -556,7 +582,7 @@ export class KnowledgebaseRepository implements IKnowledgebaseRepository {
       );
 
       if (vectors.length > 0) {
-        await index.namespace(vectorNamespace).upsert(vectors);
+        await getIndex().namespace(vectorNamespace).upsert(vectors);
       }
 
       // 4) Persist final content + status + counts
@@ -611,9 +637,9 @@ export class KnowledgebaseRepository implements IKnowledgebaseRepository {
         vectorNamespace: agentId,
         vectorIdPrefix: input.vectorIdPrefix || `doc_${uuidv4()}`,
         vectorCount: 0,
-        embeddingModel: input.embeddingModel || kb.embeddingModel || EMBEDDING_MODEL,
+        embeddingModel: input.embeddingModel || kb.embeddingModel || getEmbeddingModel(),
         embeddingDimensions:
-          input.embeddingDimensions || kb.embeddingDimensions || EMBEDDING_DIMENSIONS,
+          input.embeddingDimensions || kb.embeddingDimensions || getEmbeddingDimensions(),
         chunkSize,
         chunkOverlap,
         tokenCount: null,
@@ -873,9 +899,9 @@ export class KnowledgebaseRepository implements IKnowledgebaseRepository {
       options?.chunkSize ?? doc.chunkSize ?? 800,
       options?.chunkOverlap ?? doc.chunkOverlap ?? 200
     );
-    const embeddingModel = options?.embeddingModel ?? doc.embeddingModel ?? EMBEDDING_MODEL;
+    const embeddingModel = options?.embeddingModel ?? doc.embeddingModel ?? getEmbeddingModel();
     const embeddingDimensions =
-      options?.embeddingDimensions ?? doc.embeddingDimensions ?? EMBEDDING_DIMENSIONS;
+      options?.embeddingDimensions ?? doc.embeddingDimensions ?? getEmbeddingDimensions();
 
     // Clear old vectors (if we believe there were any)
     if ((doc.vectorCount ?? 0) > 0) {
@@ -912,7 +938,7 @@ export class KnowledgebaseRepository implements IKnowledgebaseRepository {
     );
 
     if (vectors.length > 0) {
-      await index.namespace(agentId).upsert(vectors);
+      await getIndex().namespace(agentId).upsert(vectors);
     }
 
     const updated = await this.prisma.knowledgeBaseDocument.update({
@@ -941,7 +967,7 @@ export class KnowledgebaseRepository implements IKnowledgebaseRepository {
     const defaultFilter = { status: { $eq: 'ACTIVE' } };
     const mergedFilter = mergePineconeFilters(filter, defaultFilter);
 
-    const results = await index.namespace(namespace).query({
+    const results = await getIndex().namespace(namespace).query({
       vector,
       topK,
       includeValues: false,

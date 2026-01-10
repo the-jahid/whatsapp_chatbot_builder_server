@@ -24,7 +24,8 @@ import {
   GeminiModel,
   ClaudeModel,
 } from '@prisma/client';
-import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
+
+const PrismaClientKnownRequestError = Prisma.PrismaClientKnownRequestError;
 import { CreateAgentDto, UpdateAgentDto } from './dto/agent.dto';
 import { PrismaService } from 'src/prisma/prisma.service';
 
@@ -326,7 +327,7 @@ function titleizeEnum(v: string): string {
 
 @Injectable()
 export class AgentService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private prisma: PrismaService) { }
 
   // ---------------------------------------------------
   // Helpers

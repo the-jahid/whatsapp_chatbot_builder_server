@@ -4,7 +4,6 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }
 
 /* ================================
@@ -439,8 +438,49 @@ model Broadcast {
 }
 
 /* ================================
+ * BLOG MODELS
+ * ================================ */
+
+/**
+ * Public blogs created by logged-in users.
+ * Anyone can create a blog once they are logged in.
+ * Uses oauthId (Clerk ID) directly for author lookup.
+ */
+model Blog {
+  id          String       @id @default(uuid())
+  title       String
+  content     String       @db.Text
+
+  // Image storage (stored in Postgres)
+  imageData     Bytes?
+  imageMimeType String?
+  imageFileName String?
+  imageSize     Int?
+
+  // View tracking
+  viewCount   Int          @default(0)
+
+  // Timestamps
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  // Author - stored as Clerk oauthId directly
+  oauthId     String
+
+  @@index([oauthId, createdAt])
+  @@map("blogs")
+}
+
+
+/* ================================
  * ENUMS
  * ================================ */
+
+enum BlogStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
 
 enum AIModel {
   CHATGPT
