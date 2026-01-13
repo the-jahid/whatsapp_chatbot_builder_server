@@ -7,40 +7,37 @@ import {
   ValidationPipe,
   Req,
 } from '@nestjs/common';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiResponse,
+  ApiBearerAuth,
+} from '@nestjs/swagger';
 import { GoogleAuthService } from './google-auth.service';
-import { IsNotEmpty, IsString } from 'class-validator';
 import { ClerkAuthGuard } from '../clerk-auth.guard';
 import { UserService } from 'src/user/services/user.service';
 import type { Request } from 'express';
-// NOTE: The following are examples of how you would secure the endpoints.
-// You would need to implement your own AuthGuard and a decorator to extract the user.
-// import { AuthGuard } from '../auth/auth.guard';
-// import { User } from '../auth/user.decorator';
-
-/**
- * A simple DTO class to validate the incoming callback payload.
- */
-class GoogleCallbackDto {
-  @IsString()
-  @IsNotEmpty()
-  code: string;
-}
+import {
+  GoogleCallbackDto,
+  GoogleAuthUrlResponseDto,
+  GoogleCallbackResponseDto,
+  AuthErrorResponseDto,
+} from './dto/google-auth.dto';
 
 type ReqWithAuth = Request & {
   auth?: {
-    clerkUserId?: string,
-    sessionId?: string
-    };
-}
+    clerkUserId?: string;
+    sessionId?: string;
+  };
+};
 
-
+@ApiTags('Authentication')
 @Controller('auth')
-// @UseGuards(AuthGuard) // Example: Secure all routes in this controller.
 export class GoogleAuthController {
   constructor(
     private readonly googleAuthService: GoogleAuthService,
-    private readonly userService:UserService
-  ) {}
+    private readonly userService: UserService,
+  ) { }
 
   /**
    * GET /auth/google/url
@@ -48,7 +45,17 @@ export class GoogleAuthController {
    * that the frontend should redirect the user to.
    */
   @Get('google/url')
-  getGoogleAuthUrl() {
+  @ApiOperation({
+    summary: 'Get Google OAuth URL',
+    description:
+      'Generates and returns the Google OAuth authorization URL. Redirect the user to this URL to initiate the OAuth flow.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Successfully generated Google OAuth URL',
+    type: GoogleAuthUrlResponseDto,
+  })
+  getGoogleAuthUrl(): GoogleAuthUrlResponseDto {
     const url = this.googleAuthService.generateAuthUrl();
     return { url };
   }
@@ -60,16 +67,32 @@ export class GoogleAuthController {
    */
   @Post('google/callback')
   @UseGuards(ClerkAuthGuard)
+  @ApiBearerAuth('bearer')
+  @ApiOperation({
+    summary: 'Exchange Google OAuth code for tokens',
+    description:
+      'Exchanges the authorization code from Google for access and refresh tokens. Requires authentication via Clerk session token.',
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Successfully exchanged code and connected Google account',
+    type: GoogleCallbackResponseDto,
+  })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - Missing or invalid Bearer token',
+    type: AuthErrorResponseDto,
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Bad Request - Invalid or expired authorization code',
+    type: AuthErrorResponseDto,
+  })
   async handleGoogleCallback(
     @Req() req: ReqWithAuth,
     @Body(new ValidationPipe()) body: GoogleCallbackDto,
-    // @User('id') userId: string, // In a real app, get the user ID from the session.
   ) {
-    // const userId = '92241b07-63d2-4bff-a9cd-8665cbf56a9e'; // Replace with actual user from request
-
     const me = await this.userService.getFromAuth(req.auth ?? {});
-
-    
 
     return this.googleAuthService.exchangeCodeAndSaveConnection(
       body.code,
@@ -77,8 +100,4 @@ export class GoogleAuthController {
     );
   }
 }
-
-
-
-
 
