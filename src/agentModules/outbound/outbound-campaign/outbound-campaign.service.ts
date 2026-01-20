@@ -5,7 +5,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { OutboundCampaignStatus, PrismaClient, Prisma } from '@prisma/client';
+import { OutboundCampaignStatus, Prisma } from '@prisma/client';
 import { ZodError } from 'zod';
 
 import {
@@ -21,6 +21,7 @@ import type {
   PaginatedResult,
 } from './interface';
 import { OutboundCampaignRepository } from './repository/outbound-campaign.repository';
+import { PrismaService } from 'src/prisma/prisma.service';
 
 // Prisma error type
 const PrismaClientKnownRequestError = Prisma.PrismaClientKnownRequestError;
@@ -29,7 +30,10 @@ const PrismaClientKnownRequestError = Prisma.PrismaClientKnownRequestError;
 export class OutboundCampaignService {
   private readonly logger = new Logger(OutboundCampaignService.name);
 
-  constructor(private readonly repo: OutboundCampaignRepository) { }
+  constructor(
+    private readonly repo: OutboundCampaignRepository,
+    private readonly prisma: PrismaService,
+  ) { }
 
   /* ----------------------------- Helpers ----------------------------- */
 
@@ -77,9 +81,8 @@ export class OutboundCampaignService {
    * so other endpoints/flows remain unaffected.
    */
   private async ensureDefaultBroadcast(outboundCampaignId: string): Promise<void> {
-    const prisma = new PrismaClient();
     try {
-      await prisma.broadcast.upsert({
+      await this.prisma.broadcast.upsert({
         where: { outboundCampaignId },
         create: {
           // only connect the required relation; all other fields use Prisma defaults
@@ -93,8 +96,6 @@ export class OutboundCampaignService {
         `ensureDefaultBroadcast failed for campaign ${outboundCampaignId}: ${(err as Error)?.message}`,
       );
       // swallow on purpose — do not affect campaign creation
-    } finally {
-      await prisma.$disconnect().catch(() => undefined);
     }
   }
 

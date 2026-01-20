@@ -616,37 +616,44 @@ export class WhatsappService implements OnModuleInit {
       return { status: 'close', message: 'Agent inactive; WhatsApp is paused. Activate the agent to start.' };
     }
 
+    // Check if already connected (status = 'open')
     const existingConnection = this.connections.get(agentId);
-    if (existingConnection && existingConnection.status !== 'close' && !existingConnection.paused) {
+    if (existingConnection && existingConnection.status === 'open') {
       return {
-        pairingCode: existingConnection.pairingCode,
         status: existingConnection.status,
-        message: 'Connection process is already underway.',
+        message: 'Already connected.',
       };
     }
+
+    // For phone pairing, we need to clear any existing session to get a fresh pairing code
+    // Close any existing socket first
+    if (existingConnection?.socket) {
+      try {
+        existingConnection.socket.end(new Error('starting-new-pairing'));
+      } catch { }
+    }
+
+    // Clear the session data to ensure fresh pairing
+    await this.prisma.whatsapp.upsert({
+      where: { agentId },
+      create: { agentId, sessionData: Prisma.JsonNull },
+      update: { sessionData: Prisma.JsonNull },
+    });
 
     const conn = this.ensureConn(agentId);
     conn.socket = null;
     conn.status = 'connecting';
     conn.paused = false;
+    conn.qr = undefined;
+    conn.pairingCode = undefined;
 
     return new Promise(async (resolve, reject) => {
       let promiseHandled = false;
 
       try {
-        const whatsappRecord = await this.prisma.whatsapp.findUnique({ where: { agentId } });
-
-        let creds: AuthenticationCreds;
+        // Always use fresh credentials for phone pairing
+        let creds: AuthenticationCreds = initAuthCreds();
         let keys: Record<string, any> = {};
-        const hasSavedSession = !!(whatsappRecord?.sessionData && typeof whatsappRecord.sessionData === 'string');
-
-        if (hasSavedSession) {
-          const sessionData = JSON.parse(whatsappRecord.sessionData as string, BufferJSON.reviver);
-          creds = sessionData.creds;
-          keys = sessionData.keys;
-        } else {
-          creds = initAuthCreds();
-        }
 
         const saveState = async () => {
           const sessionToSave = { creds, keys };
@@ -703,6 +710,9 @@ export class WhatsappService implements OnModuleInit {
 
         socket.ev.on('creds.update', saveState);
 
+        // Track if we've requested the pairing code
+        let pairingCodeRequested = false;
+
         socket.ev.on('connection.update', async (update) => {
           const { connection, lastDisconnect, qr } = update;
           const c = this.connections.get(agentId);
@@ -719,13 +729,33 @@ export class WhatsappService implements OnModuleInit {
 
           if (!c) return;
 
-          if (qr && !c.paused) {
-            const qrDataURL = await toDataURL(qr);
-            c.qr = qrDataURL;
-            c.status = 'connecting';
-            if (!promiseHandled) {
-              promiseHandled = true;
-              resolve({ status: 'connecting', message: 'QR code received. Please scan.' });
+          // When we receive a QR update, it means the socket is ready for pairing code request
+          // For phone pairing flow, we request pairing code instead of using QR
+          if (qr && !c.paused && !pairingCodeRequested) {
+            pairingCodeRequested = true;
+            try {
+              const normalized = this.normalizePairingPhone(phoneNumber);
+              console.log('Requesting pairing code for phone:', normalized);
+              const code = await (socket as any).requestPairingCode(normalized);
+              console.log('Pairing code received:', code);
+              c.pairingCode = code;
+              c.status = 'connecting';
+              c.qr = undefined; // Clear QR since we're using phone pairing
+              if (!promiseHandled) {
+                promiseHandled = true;
+                resolve({
+                  pairingCode: code,
+                  status: 'connecting',
+                  message:
+                    'Pairing code generated. On your phone: WhatsApp → Linked devices → Link with phone number → Enter this code.',
+                });
+              }
+            } catch (e: any) {
+              console.error('Failed to request pairing code:', e);
+              if (!promiseHandled) {
+                promiseHandled = true;
+                reject(new Error(e?.message || 'Failed to generate pairing code.'));
+              }
             }
           }
 
@@ -768,9 +798,7 @@ export class WhatsappService implements OnModuleInit {
               reject(new Error(`Connection closed. Reason: ${reason || 'Unknown'}`));
             }
 
-            if (!c.paused) {
-              setTimeout(() => this.startWithPhone(agentId, phoneNumber).catch(() => { }), 5000);
-            }
+            // Don't auto-retry for phone pairing - let the user retry manually
           } else if (connection === 'open') {
             c.status = 'open';
             c.qr = undefined;
@@ -814,31 +842,8 @@ export class WhatsappService implements OnModuleInit {
           }
         });
 
-        if (!hasSavedSession) {
-          try {
-            const normalized = this.normalizePairingPhone(phoneNumber);
-            const code = await (socket as any).requestPairingCode(normalized);
-            const c2 = this.connections.get(agentId);
-            if (c2) {
-              c2.pairingCode = code;
-              c2.status = 'connecting';
-            }
-            if (!promiseHandled) {
-              promiseHandled = true;
-              return resolve({
-                pairingCode: code,
-                status: 'connecting',
-                message:
-                  'Pairing code generated. On your phone: WhatsApp → Linked devices → Link with phone number → Enter this code.',
-              });
-            }
-          } catch (e: any) {
-            if (!promiseHandled) {
-              promiseHandled = true;
-              return reject(new Error(e?.message || 'Failed to generate pairing code.'));
-            }
-          }
-        }
+        // Note: Pairing code is now requested when QR is received in connection.update
+        // This ensures the socket is ready before requesting the pairing code
       } catch (error: any) {
         if (!promiseHandled) {
           promiseHandled = true;
