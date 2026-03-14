@@ -33,7 +33,8 @@ async function bootstrap() {
   // 2. Enable CORS with specific options.
   // We use a dynamic callback for 'origin' to be robust against trailing slashes.
   app.enableCors({
-    origin: '*',
+    origin: (origin: string | undefined, callback: (err: Error | null, origin?: string) => void) => callback(null, origin || '*'),
+    credentials: true,
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
     allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With'],
   });
