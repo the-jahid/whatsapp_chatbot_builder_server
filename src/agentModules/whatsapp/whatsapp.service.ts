@@ -13,7 +13,10 @@ import makeWASocket, {
   initAuthCreds,
   AuthenticationCreds,
   SignalKeyStore,
+  jidNormalizedUser,
+  getBinaryNodeChild,
 } from '@whiskeysockets/baileys';
+import { buildTcTokenFromJid } from './utils/tctoken';
 import { toDataURL } from 'qrcode';
 import { Boom } from '@hapi/boom';
 import { PrismaService } from 'src/prisma/prisma.service';
@@ -77,12 +80,49 @@ type MediaInput = {
 const QR_TTL_MS = 55_000;
 const QR_SUGGESTED_REFRESH_MS = 25_000;
 
+/* -------------------------------------------------------------------------- */
+/*                          Browser Fingerprints                              */
+/* -------------------------------------------------------------------------- */
+
+// Browser fingerprints for random assignment to each user/agent
+// Format: [client name, browser name, version]
+const BROWSER_FINGERPRINTS: [string, string, string][] = [
+  ['Chrome', 'Chrome', '120.0.6099.129'],
+  ['Chrome', 'Chrome', '121.0.6167.85'],
+  ['Chrome', 'Chrome', '122.0.6261.69'],
+  ['Chrome', 'Chrome', '123.0.6312.58'],
+  ['Chrome', 'Chrome', '124.0.6367.118'],
+  ['Firefox', 'Firefox', '122.0'],
+  ['Firefox', 'Firefox', '123.0'],
+  ['Firefox', 'Firefox', '124.0'],
+  ['Firefox', 'Firefox', '125.0'],
+  ['Edge', 'Edge', '120.0.2210.91'],
+  ['Edge', 'Edge', '121.0.2277.83'],
+  ['Edge', 'Edge', '122.0.2365.52'],
+  ['Safari', 'Safari', '17.2.1'],
+  ['Safari', 'Safari', '17.3'],
+  ['Safari', 'Safari', '17.4'],
+  ['Opera', 'Opera', '106.0.4998.19'],
+  ['Opera', 'Opera', '107.0.5045.21'],
+  ['Brave', 'Brave', '1.62.153'],
+  ['Brave', 'Brave', '1.63.165'],
+  ['Vivaldi', 'Vivaldi', '6.5.3206.39'],
+];
+
 @Injectable()
 export class WhatsappService implements OnModuleInit {
   private readonly baileysLogger = pino({ level: 'silent', enabled: false });
   private connections = new Map<string, WhatsappConnection>();
   private latestQrTicket = new Map<string, QrTicket>();
   private readonly phoneUtil = PhoneNumberUtil.getInstance();
+  // Track which browser fingerprint is assigned to each agent
+  private agentBrowsers = new Map<string, [string, string, string]>();
+
+  // Rate Limiting Queue
+  private messageQueues = new Map<string, Array<() => Promise<void>>>();
+  private isProcessingQueue = new Map<string, boolean>();
+  private readonly MIN_DELAY_MS = 2000;
+  private readonly MAX_DELAY_MS = 22000;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -292,8 +332,80 @@ export class WhatsappService implements OnModuleInit {
   }
 
   /* ------------------------------------------------------------------------ */
+  /*                             Rate Limiting Queue                           */
+  /* ------------------------------------------------------------------------ */
+
+  private async enqueueMessage(agentId: string, task: () => Promise<void>) {
+    // Initialize queue if not exists
+    if (!this.messageQueues.has(agentId)) {
+      this.messageQueues.set(agentId, []);
+    }
+    const queue = this.messageQueues.get(agentId)!;
+    queue.push(task);
+
+    // Trigger processing if not already running
+    if (!this.isProcessingQueue.get(agentId)) {
+      this.processQueue(agentId);
+    }
+  }
+
+  private async processQueue(agentId: string) {
+    this.isProcessingQueue.set(agentId, true);
+    const queue = this.messageQueues.get(agentId);
+
+    if (!queue) {
+      this.isProcessingQueue.set(agentId, false);
+      return;
+    }
+
+    while (queue.length > 0) {
+      const task = queue.shift();
+      if (task) {
+        try {
+          await task();
+        } catch (error) {
+          console.error(`Error processing message for agent ${agentId}:`, error);
+          // Continue to next message even if one fails
+        }
+
+        // Wait for random delay before sending the next one
+        if (queue.length > 0) {
+          const delay = Math.floor(Math.random() * (this.MAX_DELAY_MS - this.MIN_DELAY_MS + 1)) + this.MIN_DELAY_MS;
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+      }
+    }
+
+    this.isProcessingQueue.set(agentId, false);
+  }
+
+  /* ------------------------------------------------------------------------ */
   /*                             Public Send Methods                           */
   /* ------------------------------------------------------------------------ */
+
+  /**
+   * Simulates presence (typing) using tcToken to reduce ban risk.
+   */
+  private async simulatePresence(socket: WASocket, jid: string): Promise<void> {
+    try {
+      // @ts-ignore - authState might not be in the strict WASocket type definition but is present at runtime
+      const authState = socket.authState;
+      let tctoken: Buffer | undefined;
+
+      if (authState) {
+        try {
+          tctoken = await buildTcTokenFromJid(jid, authState);
+        } catch {
+          // ignore token build error
+        }
+      }
+
+      await socket.presenceSubscribe(jid, tctoken);
+      await socket.sendPresenceUpdate('composing', jid);
+    } catch {
+      // ignore presence error
+    }
+  }
 
   /** Send a plain text message. Accepts a phone number or a JID. */
   async sendText(agentId: string, to: string, text: string): Promise<{ id: string; to: string }> {
@@ -306,22 +418,43 @@ export class WhatsappService implements OnModuleInit {
       throw new NotFoundException('WhatsApp is not connected for this agent');
     }
 
-    const socket = this.getOpenSocket(agentId);
-    const jid = this.normalizeToJid(to);
+    // Return a promise that resolves when the message is actually sent (or at least enqueued effectively)
+    // Note: We construct the promise logic inside the enqueued task to return the ID.
+    // However, queuing forces us to either await the queue or return a "pending" status.
+    // For simplicity in this architecture, we will await the specific task execution by identifying it,
+    // OR we change the return type. 
+    // BUT, to keep existing API contract, we will wrap the execution in a Promise that we await.
 
-    try {
-      if (typeof (socket as any).onWhatsApp === 'function') {
-        const results = await (socket as any).onWhatsApp(jid);
-        const exists = Array.isArray(results) ? results.some((r: any) => r?.jid === jid && r?.exists) : false;
-        if (!exists) throw new BadRequestException(`The number "${to}" is not registered on WhatsApp.`);
-      }
-    } catch {
-      // ignore existence check failure
-    }
+    return new Promise((resolve, reject) => {
+      this.enqueueMessage(agentId, async () => {
+        try {
+          const socket = this.getOpenSocket(agentId);
+          const jid = this.normalizeToJid(to);
 
-    const res = await socket.sendMessage(jid, { text });
-    const id = (res as any)?.key?.id ?? '';
-    return { id, to: jid };
+          // Simulate presence before sending to reduce ban risk
+          await this.simulatePresence(socket, jid);
+
+          // Check existence (optional, can be skipped for speed/safety)
+          try {
+            if (typeof (socket as any).onWhatsApp === 'function') {
+              const results = await (socket as any).onWhatsApp(jid);
+              const exists = Array.isArray(results) ? results.some((r: any) => r?.jid === jid && r?.exists) : false;
+              // We log but don't strictly block to avoid queue jams on minor network blips, 
+              // or we can throw to reject the promise.
+              // if (!exists) throw new BadRequestException(`The number "${to}" is not registered on WhatsApp.`);
+            }
+          } catch {
+            // ignore existence check failure
+          }
+
+          const res = await socket.sendMessage(jid, { text });
+          const id = (res as any)?.key?.id ?? '';
+          resolve({ id, to: jid });
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
   }
 
   /** Send media (image / video / document) with an optional caption. */
@@ -334,39 +467,40 @@ export class WhatsappService implements OnModuleInit {
       throw new BadRequestException('"to", "mimeType" and "data" are required to send media.');
     }
 
-    const socket = this.getOpenSocket(agentId);
-    const jid = this.normalizeToJid(to);
+    return new Promise((resolve, reject) => {
+      this.enqueueMessage(agentId, async () => {
+        try {
+          const socket = this.getOpenSocket(agentId);
+          const jid = this.normalizeToJid(to);
 
-    try {
-      if (typeof (socket as any).onWhatsApp === 'function') {
-        const results = await (socket as any).onWhatsApp(jid);
-        const exists = Array.isArray(results) ? results.some((r: any) => r?.jid === jid && r?.exists) : false;
-        if (!exists) throw new BadRequestException(`The number "${to}" is not registered on WhatsApp.`);
-      }
-    } catch {
-      // ignore
-    }
+          // Simulate presence before sending to reduce ban risk
+          await this.simulatePresence(socket, jid);
 
-    const buffer = this.ensureBuffer(media.data);
-    const kind = this.detectMediaKind(media.mimeType);
+          const buffer = this.ensureBuffer(media.data);
+          const kind = this.detectMediaKind(media.mimeType);
 
-    let content: any;
-    if (kind === 'image') {
-      content = { image: buffer, caption: media.caption };
-    } else if (kind === 'video') {
-      content = { video: buffer, caption: media.caption };
-    } else {
-      content = {
-        document: buffer,
-        mimetype: media.mimeType,
-        fileName: media.filename || 'file',
-        caption: media.caption,
-      };
-    }
+          let content: any;
+          if (kind === 'image') {
+            content = { image: buffer, caption: media.caption };
+          } else if (kind === 'video') {
+            content = { video: buffer, caption: media.caption };
+          } else {
+            content = {
+              document: buffer,
+              mimetype: media.mimeType,
+              fileName: media.filename || 'file',
+              caption: media.caption,
+            };
+          }
 
-    const res = await socket.sendMessage(jid, content);
-    const id = (res as any)?.key?.id ?? '';
-    return { id, to: jid, kind };
+          const res = await socket.sendMessage(jid, content);
+          const id = (res as any)?.key?.id ?? '';
+          resolve({ id, to: jid, kind });
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
   }
 
   /** Send media with caption and then an extra follow-up text message. */
@@ -383,6 +517,49 @@ export class WhatsappService implements OnModuleInit {
       textId = t.id;
     }
     return { mediaId: sent.id, textId, to: sent.to };
+  }
+
+  /* ------------------------------------------------------------------------ */
+  /*                            Profile Picture w/ tctoken                    */
+  /* ------------------------------------------------------------------------ */
+
+  /**
+   * Fetch profile picture URL with tctoken support (custom implementation)
+   */
+  async getProfilePictureUrl(agentId: string, jid: string, type: 'preview' | 'image' = 'preview', timeoutMs?: number): Promise<string | undefined> {
+    const socket = this.getOpenSocket(agentId);
+    jid = jidNormalizedUser(jid);
+
+    // @ts-ignore - authState exists on socket
+    const authState = socket.authState;
+    let tctoken: Buffer | undefined;
+    if (authState) {
+      try {
+        tctoken = await buildTcTokenFromJid(jid, authState);
+      } catch (e) {
+        // ignore error
+      }
+    }
+
+    const result = await socket.query({
+      tag: 'iq',
+      attrs: {
+        target: jid,
+        to: 's.whatsapp.net',
+        type: 'get',
+        xmlns: 'w:profile:picture'
+      },
+      content: [
+        {
+          tag: 'picture',
+          attrs: { type, query: 'url' },
+          content: tctoken ? [{ tag: 'tctoken', attrs: {}, content: tctoken }] : undefined
+        }
+      ]
+    }, timeoutMs);
+
+    const child = getBinaryNodeChild(result, 'picture');
+    return child?.attrs?.url;
   }
 
   /* ------------------------------------------------------------------------ */
@@ -462,11 +639,13 @@ export class WhatsappService implements OnModuleInit {
         };
 
         const { version } = await fetchLatestBaileysVersion();
+        const browser = this.getAgentBrowser(agentId);
         const socket = makeWASocket({
           version,
           printQRInTerminal: false,
           auth: { creds, keys: makeCacheableSignalKeyStore(signalStore, this.baileysLogger as any) },
           logger: this.baileysLogger as any,
+          browser,
         });
 
         const connInMap = this.connections.get(agentId);
@@ -688,11 +867,13 @@ export class WhatsappService implements OnModuleInit {
         };
 
         const { version } = await fetchLatestBaileysVersion();
+        const browser = this.getAgentBrowser(agentId);
         const socket = makeWASocket({
           version,
           printQRInTerminal: false,
           auth: { creds, keys: makeCacheableSignalKeyStore(signalStore, this.baileysLogger as any) },
           logger: this.baileysLogger as any,
+          browser,
         });
 
         const connInMap = this.connections.get(agentId);
@@ -957,7 +1138,7 @@ export class WhatsappService implements OnModuleInit {
   async checkNumberOnWhatsApp(
     agentId: string,
     phoneNumber: string,
-  ): Promise<{ exists: boolean; jid?: string }> {
+  ): Promise<{ exists: boolean; jid?: string; lid?: string }> {
     const conn = this.connections.get(agentId);
     if (!conn || !conn.socket || conn.status !== 'open') {
       throw new BadRequestException(
@@ -975,7 +1156,7 @@ export class WhatsappService implements OnModuleInit {
         if (Array.isArray(results) && results.length > 0) {
           const result = results[0];
           if (result && result.exists) {
-            return { exists: true, jid: result.jid };
+            return { exists: true, jid: result.jid, lid: result.lid };
           }
         }
         return { exists: false };
@@ -990,6 +1171,22 @@ export class WhatsappService implements OnModuleInit {
   /* ------------------------------------------------------------------------ */
   /*                                  Utils                                   */
   /* ------------------------------------------------------------------------ */
+
+  /**
+   * Get or assign a random browser fingerprint for an agent.
+   * Once assigned, the same browser is used consistently for that agent's session.
+   */
+  private getAgentBrowser(agentId: string): [string, string, string] {
+    let browser = this.agentBrowsers.get(agentId);
+    if (!browser) {
+      // Randomly select a browser fingerprint for this agent
+      const randomIndex = Math.floor(Math.random() * BROWSER_FINGERPRINTS.length);
+      browser = BROWSER_FINGERPRINTS[randomIndex];
+      this.agentBrowsers.set(agentId, browser);
+      console.log(`[WhatsApp] Assigned browser to agent ${agentId}: ${browser[0]} ${browser[1]} v${browser[2]}`);
+    }
+    return browser;
+  }
 
   private ensureConn(agentId: string): WhatsappConnection {
     let conn = this.connections.get(agentId);
@@ -1080,7 +1277,7 @@ export class WhatsappService implements OnModuleInit {
   }
 
   private isJid(input: string): boolean {
-    return /@s\.whatsapp\.net$|@g\.us$/.test(input);
+    return /@s\.whatsapp\.net$|@g\.us$|@lid$/.test(input);
   }
 
   private normalizeToJid(to: string): string {

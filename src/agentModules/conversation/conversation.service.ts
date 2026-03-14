@@ -14,7 +14,7 @@ import { CreateConversationDto } from './dto/conversation.dto';
 export class ConversationService {
   private readonly logger = new Logger(ConversationService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) { }
 
   /**
    * Creates a new conversation message in the database.
@@ -153,6 +153,112 @@ export class ConversationService {
       throw new InternalServerErrorException(
         'Failed to retrieve sent numbers for this campaign.',
       );
+    }
+  }
+
+  // ===============================================================
+  // 🔥 PAUSED CONVERSATION METHODS (Human Intervention)
+  // ===============================================================
+
+  /**
+   * Check if AI is paused for a specific user.
+   */
+  async isPaused(agentId: string, senderJid: string): Promise<boolean> {
+    try {
+      const paused = await this.prisma.pausedConversation.findUnique({
+        where: { agentId_senderJid: { agentId, senderJid } },
+      });
+      return !!paused;
+    } catch (error) {
+      this.logger.error(
+        `Failed to check paused status for agent "${agentId}" and sender "${senderJid}"`,
+        error.stack,
+      );
+      return false; // Default to not paused on error
+    }
+  }
+
+  /**
+   * Pause AI responses for a specific user.
+   */
+  async pauseAI(
+    agentId: string,
+    senderJid: string,
+    reason?: string,
+    pausedBy?: string,
+  ) {
+    try {
+      return await this.prisma.pausedConversation.upsert({
+        where: { agentId_senderJid: { agentId, senderJid } },
+        update: { reason, pausedBy, pausedAt: new Date() },
+        create: { agentId, senderJid, reason, pausedBy },
+      });
+    } catch (error) {
+      this.logger.error(
+        `Failed to pause AI for agent "${agentId}" and sender "${senderJid}"`,
+        error.stack,
+      );
+      throw new InternalServerErrorException('Failed to pause AI for this user.');
+    }
+  }
+
+  /**
+   * Resume AI responses for a specific user.
+   */
+  async resumeAI(agentId: string, senderJid: string): Promise<void> {
+    try {
+      await this.prisma.pausedConversation.deleteMany({
+        where: { agentId, senderJid },
+      });
+    } catch (error) {
+      this.logger.error(
+        `Failed to resume AI for agent "${agentId}" and sender "${senderJid}"`,
+        error.stack,
+      );
+      throw new InternalServerErrorException('Failed to resume AI for this user.');
+    }
+  }
+
+  /**
+   * List all paused users for an agent.
+   */
+  async listPausedUsers(agentId: string) {
+    try {
+      return await this.prisma.pausedConversation.findMany({
+        where: { agentId },
+        orderBy: { pausedAt: 'desc' },
+      });
+    } catch (error) {
+      this.logger.error(
+        `Failed to list paused users for agent "${agentId}"`,
+        error.stack,
+      );
+      throw new InternalServerErrorException('Failed to list paused users.');
+    }
+  }
+
+  /**
+   * Get pause details for a specific user.
+   */
+  async getPauseStatus(agentId: string, senderJid: string) {
+    try {
+      const paused = await this.prisma.pausedConversation.findUnique({
+        where: { agentId_senderJid: { agentId, senderJid } },
+      });
+      return {
+        isPaused: !!paused,
+        ...(paused && {
+          reason: paused.reason,
+          pausedAt: paused.pausedAt,
+          pausedBy: paused.pausedBy,
+        }),
+      };
+    } catch (error) {
+      this.logger.error(
+        `Failed to get pause status for agent "${agentId}" and sender "${senderJid}"`,
+        error.stack,
+      );
+      throw new InternalServerErrorException('Failed to get pause status.');
     }
   }
 }

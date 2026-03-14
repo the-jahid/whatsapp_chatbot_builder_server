@@ -83,6 +83,13 @@ export class MessageHandlerService {
         },
       });
 
+      // Check if AI is paused for this user (human intervention mode)
+      const isPaused = await this.isAIPausedForUser(agentId, senderJid);
+      if (isPaused) {
+        // Skip AI response - human operator is handling this conversation
+        return;
+      }
+
       const historyLimit = this.clampHistoryLimit(agent.historyLimit);
       const history: BaseMessage[] =
         agent.memoryType === MemoryType.BUFFER
@@ -201,7 +208,16 @@ export class MessageHandlerService {
   /** Show typing indicator while running */
   private async sendTyping(socket: WASocket, jid: string): Promise<void> {
     try {
-      await socket.presenceSubscribe(jid);
+      // @ts-ignore - authState might not be in the strict WASocket type definition but is present at runtime
+      const authState = socket.authState;
+      let tctoken: Buffer | undefined;
+
+      if (authState) {
+        const { buildTcTokenFromJid } = await import('../utils/tctoken');
+        tctoken = await buildTcTokenFromJid(jid, authState);
+      }
+
+      await socket.presenceSubscribe(jid, tctoken);
       await socket.sendPresenceUpdate('composing', jid);
     } catch {
       // ignore
@@ -262,5 +278,23 @@ export class MessageHandlerService {
     });
     const buf = Buffer.from(await (speech as any).arrayBuffer());
     return { audio: buf, mimetype: 'audio/mpeg', ptt: false };
+  }
+
+  /* ---------------------------- Pause helpers ---------------------------- */
+
+  /**
+   * Check if AI is paused for a specific user (human intervention mode).
+   * Returns true if the user's conversation is paused.
+   */
+  private async isAIPausedForUser(agentId: string, senderJid: string): Promise<boolean> {
+    try {
+      const paused = await this.prisma.pausedConversation.findUnique({
+        where: { agentId_senderJid: { agentId, senderJid } },
+      });
+      return !!paused;
+    } catch {
+      // On error, default to not paused (continue with AI)
+      return false;
+    }
   }
 }

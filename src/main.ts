@@ -37,6 +37,7 @@ async function bootstrap() {
       const allowedOrigins = [
         'http://localhost:3001',
         'http://localhost:3000',
+        'http://localhost:3002',
         'https://wapzen.io',
         'https://www.wapzen.io',
         'https://9b90be51bd86.ngrok-free.app',

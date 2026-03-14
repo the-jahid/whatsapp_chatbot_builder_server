@@ -32,12 +32,12 @@ const DEFAULT_MESSAGE_GAP_SECONDS = 120; // fallback, not used for progressive t
 const DEFAULT_ACK_TIMEOUT_MS = 90_000; // 90s
 
 /**
- * Progressive delay pattern to avoid WhatsApp AI detection.
- * Cycles through 1-5 minute delays: 1 min -> 2 min -> 3 min -> 4 min -> 5 min -> repeat
- * Average delay = 3 minutes, allowing ~480 messages in 24 hours at steady rate
- * With daily active hours ~16-20 hours, this supports ~1000+ messages/day
+ * Random delay pattern to mimic human behavior.
+ * Delays between 2 and 22 seconds (average 12s).
+ * Target rate: ~50 messages per 10 minutes (300 messages/hour).
  */
-const PROGRESSIVE_DELAYS_SECONDS = [60, 120, 180, 240, 300]; // 1, 2, 3, 4, 5 minutes
+const MIN_DELAY_MS = 2000;
+const MAX_DELAY_MS = 22000;
 
 type RenderableTemplate =
   | {
@@ -83,8 +83,8 @@ export class OutboundBroadcastService {
   /** Prevent overlapping passes for same broadcast */
   private readonly inFlight = new Set<string>();
 
-  /** Track message count per broadcast for progressive delay cycling */
-  private readonly broadcastMessageIndex = new Map<string, number>();
+  /** Track the next delay required for each broadcast */
+  private readonly nextDelayMap = new Map<string, number>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -551,6 +551,7 @@ export class OutboundBroadcastService {
         messageGapSeconds: true,
         selectedTemplateId: true,
         status: true,
+        totalSent: true,
         createdAt: true,
       },
       orderBy: { createdAt: 'asc' },
@@ -575,7 +576,7 @@ export class OutboundBroadcastService {
         }
 
         const lastAttemptAt = await this.getLastAttemptAt(b.outboundCampaignId);
-        const progressiveGapMs = this.getProgressiveDelayMs(b.id);
+        const progressiveGapMs = this.getNextDelayMs(b.id, b.totalSent);
         if (lastAttemptAt && Date.now() - lastAttemptAt.getTime() < progressiveGapMs) {
           continue;
         }
@@ -587,6 +588,7 @@ export class OutboundBroadcastService {
             id: b.id,
             messageGapSeconds: b.messageGapSeconds ?? DEFAULT_MESSAGE_GAP_SECONDS,
             selectedTemplateId: b.selectedTemplateId ?? null,
+            totalSent: b.totalSent,
           },
         );
 
@@ -612,6 +614,7 @@ export class OutboundBroadcastService {
       id: string;
       messageGapSeconds?: number | null;
       selectedTemplateId?: string | null;
+      totalSent?: number;
     },
   ) {
     if (this.inFlight.has(broadcast.id)) {
@@ -627,7 +630,7 @@ export class OutboundBroadcastService {
       }
 
       const lastAttemptAt = await this.getLastAttemptAt(campaignId);
-      const progressiveGapMs = this.getProgressiveDelayMs(broadcast.id);
+      const progressiveGapMs = this.getNextDelayMs(broadcast.id);
       if (lastAttemptAt && Date.now() - lastAttemptAt.getTime() < progressiveGapMs) {
         return {
           processed: 0,
@@ -695,28 +698,38 @@ export class OutboundBroadcastService {
       let failed = 0;
 
       try {
+        // Resolve target ID (prefer LID)
+        let targetId = lead.phoneNumber!.replace(/^\+/, '') + '@s.whatsapp.net';
+        try {
+          const check = await this.whatsapp.checkNumberOnWhatsApp(agentId, lead.phoneNumber!);
+          if (check.exists) {
+            if (check.lid) targetId = check.lid;
+            else if (check.jid) targetId = check.jid;
+          }
+        } catch (e) {
+          // ignore check errors, use default JID as fallback if lookup fails
+        }
+
         const text = this.renderTextForLead(lead as any, template);
         const media = this.renderMediaForTemplate(template, text);
 
         const sendPromise = media
           ? this.whatsappSendMedia(
             agentId,
-            lead.phoneNumber!,
+            targetId,
             media.mimeType,
             media.data,
             media.filename,
             media.caption,
           )
-          : this.whatsappSendText(agentId, lead.phoneNumber!, text);
+          : this.whatsappSendText(agentId, targetId, text);
 
         await this.withTimeout(sendPromise, DEFAULT_ACK_TIMEOUT_MS, 'ACK_TIMEOUT');
 
         // ✅ conversation log payload — WIDEN TYPE to allow metadata
-        // Normalize phone number by removing + prefix
-        const normalizedPhone = lead.phoneNumber!.replace(/^\+/, '');
         const payload: any = {
           agentId,
-          senderJid: normalizedPhone + '@s.whatsapp.net',
+          senderJid: targetId, // This will be the LID if available
           senderType: SenderType.AI,
           message: media ? (media.caption ?? text) : text,
           metadata: {
@@ -750,9 +763,9 @@ export class OutboundBroadcastService {
         });
 
         sent += 1;
-        // Advance the progressive delay index after successful send
-        this.advanceProgressiveDelayIndex(broadcast.id);
-        const nextDelaySec = this.getProgressiveDelaySeconds(broadcast.id);
+        // Initialize next delay for random interval
+        this.updateNextDelay(broadcast.id, (broadcast.totalSent || 0) + sent);
+        const nextDelaySec = Math.round(this.getNextDelayMs(broadcast.id) / 1000);
         this.logger.log(`[SEND OK] campaign=${campaignId} to=${lead.phoneNumber} | next delay=${nextDelaySec}s`);
       } catch (err: any) {
         const terminal = attemptsIncludingThis >= maxAttempts;
@@ -998,28 +1011,46 @@ export class OutboundBroadcastService {
   /* -------------------------------------------------------------------------- */
 
   /**
-   * Get the current delay in milliseconds for a broadcast based on its message index.
-   * Cycles through: 1 min (60s), 2 min (120s), 3 min (180s), 4 min (240s), 5 min (300s)
+   * Get the current delay in milliseconds for a broadcast.
+   * If no delay is set, generates one immediately.
    */
-  private getProgressiveDelayMs(broadcastId: string): number {
-    return this.getProgressiveDelaySeconds(broadcastId) * 1000;
+  private getNextDelayMs(broadcastId: string, sentCount = 0): number {
+    if (!this.nextDelayMap.has(broadcastId)) {
+      this.updateNextDelay(broadcastId, sentCount);
+    }
+    return this.nextDelayMap.get(broadcastId)!;
   }
 
   /**
-   * Get the current delay in seconds for a broadcast based on its message index.
+   * Generate a new random delay based on "Warm-Up Mode" logic.
+   * 1-20 msgs: 60-120s
+   * 21-50 msgs: 45-90s
+   * Every 10th msg: Pause 5 mins (300s)
    */
-  private getProgressiveDelaySeconds(broadcastId: string): number {
-    const index = this.broadcastMessageIndex.get(broadcastId) ?? 0;
-    return PROGRESSIVE_DELAYS_SECONDS[index % PROGRESSIVE_DELAYS_SECONDS.length];
-  }
+  private updateNextDelay(broadcastId: string, sentCount: number): void {
+    // Check for "Stop-and-Go" (every 10th message)
+    // We add +1 because sentCount is "messages ALREADY sent". 
+    // If sentCount=9 (about to send 10th), next delay is normal.
+    // If sentCount=10 (just sent 10th), we need big pause.
+    if (sentCount > 0 && sentCount % 10 === 0) {
+      this.logger.log(`[WARM-UP] Pausing 5 minutes after ${sentCount} messages...`);
+      this.nextDelayMap.set(broadcastId, 300_000); // 5 minutes
+      return;
+    }
 
-  /**
-   * Advance the message index for progressive delay cycling.
-   * Called after each successful message send.
-   */
-  private advanceProgressiveDelayIndex(broadcastId: string): void {
-    const currentIndex = this.broadcastMessageIndex.get(broadcastId) ?? 0;
-    this.broadcastMessageIndex.set(broadcastId, currentIndex + 1);
+    let min = MIN_DELAY_MS;
+    let max = MAX_DELAY_MS;
+
+    if (sentCount < 20) {
+      min = 60_000;  // 60s
+      max = 120_000; // 120s
+    } else if (sentCount < 50) {
+      min = 45_000;  // 45s
+      max = 90_000;  // 90s
+    }
+
+    const delay = Math.floor(Math.random() * (max - min + 1)) + min;
+    this.nextDelayMap.set(broadcastId, delay);
   }
 
   private escapeRegExp(s: string) {

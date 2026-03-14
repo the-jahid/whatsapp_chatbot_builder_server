@@ -1,13 +1,17 @@
 // src/conversation/conversation.controller.ts
 
 import {
+  Body,
   Controller,
+  Delete,
   Get,
+  HttpCode,
   HttpException,
   HttpStatus,
   Logger,
   Param,
   ParseUUIDPipe,
+  Post,
 } from '@nestjs/common';
 import { ConversationService } from './conversation.service';
 import { ApiTags, ApiOperation, ApiParam, ApiResponse } from '@nestjs/swagger';
@@ -17,7 +21,7 @@ import { ApiTags, ApiOperation, ApiParam, ApiResponse } from '@nestjs/swagger';
 export class ConversationController {
   private readonly logger = new Logger(ConversationController.name);
 
-  constructor(private readonly conversationService: ConversationService) {}
+  constructor(private readonly conversationService: ConversationService) { }
 
   /* -------------------------------------------------------------------------- */
   /*                           GET ALL FOR AGENT                                 */
@@ -122,6 +126,109 @@ export class ConversationController {
       );
       throw new HttpException(
         'Failed to retrieve sent numbers for this campaign.',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /* -------------------------------------------------------------------------- */
+  /*                    🔥 PAUSED CONVERSATION ENDPOINTS                         */
+  /* -------------------------------------------------------------------------- */
+
+  @Get('agent/:agentId/paused')
+  @ApiOperation({ summary: 'List all users with AI paused for this agent' })
+  @ApiParam({ name: 'agentId', description: 'The UUID of the agent', type: 'string' })
+  @ApiResponse({ status: 200, description: 'Returns list of paused users.' })
+  @ApiResponse({ status: 500, description: 'Internal server error.' })
+  async listPausedUsers(@Param('agentId', new ParseUUIDPipe()) agentId: string) {
+    try {
+      return await this.conversationService.listPausedUsers(agentId);
+    } catch (error) {
+      this.logger.error(
+        `Failed to list paused users for agent ${agentId}: ${error.message}`,
+        error.stack,
+      );
+      throw new HttpException(
+        'Failed to list paused users.',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  @Get('agent/:agentId/pause/:senderJid/status')
+  @ApiOperation({ summary: 'Check if AI is paused for a specific user' })
+  @ApiParam({ name: 'agentId', description: 'The UUID of the agent', type: 'string' })
+  @ApiParam({ name: 'senderJid', description: "The user's WhatsApp JID", type: 'string' })
+  @ApiResponse({ status: 200, description: 'Returns pause status.' })
+  @ApiResponse({ status: 500, description: 'Internal server error.' })
+  async getPauseStatus(
+    @Param('agentId', new ParseUUIDPipe()) agentId: string,
+    @Param('senderJid') senderJid: string,
+  ) {
+    try {
+      return await this.conversationService.getPauseStatus(agentId, senderJid);
+    } catch (error) {
+      this.logger.error(
+        `Failed to get pause status: ${error.message}`,
+        error.stack,
+      );
+      throw new HttpException(
+        'Failed to get pause status.',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  @Post('agent/:agentId/pause/:senderJid')
+  @ApiOperation({ summary: 'Pause AI responses for a specific user (human intervention)' })
+  @ApiParam({ name: 'agentId', description: 'The UUID of the agent', type: 'string' })
+  @ApiParam({ name: 'senderJid', description: "The user's WhatsApp JID", type: 'string' })
+  @ApiResponse({ status: 201, description: 'AI paused for user.' })
+  @ApiResponse({ status: 500, description: 'Internal server error.' })
+  async pauseAI(
+    @Param('agentId', new ParseUUIDPipe()) agentId: string,
+    @Param('senderJid') senderJid: string,
+    @Body() body: { reason?: string; pausedBy?: string },
+  ) {
+    try {
+      return await this.conversationService.pauseAI(
+        agentId,
+        senderJid,
+        body?.reason,
+        body?.pausedBy,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Failed to pause AI for user ${senderJid}: ${error.message}`,
+        error.stack,
+      );
+      throw new HttpException(
+        'Failed to pause AI for this user.',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  @Delete('agent/:agentId/pause/:senderJid')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({ summary: 'Resume AI responses for a specific user' })
+  @ApiParam({ name: 'agentId', description: 'The UUID of the agent', type: 'string' })
+  @ApiParam({ name: 'senderJid', description: "The user's WhatsApp JID", type: 'string' })
+  @ApiResponse({ status: 204, description: 'AI resumed for user.' })
+  @ApiResponse({ status: 500, description: 'Internal server error.' })
+  async resumeAI(
+    @Param('agentId', new ParseUUIDPipe()) agentId: string,
+    @Param('senderJid') senderJid: string,
+  ) {
+    try {
+      await this.conversationService.resumeAI(agentId, senderJid);
+    } catch (error) {
+      this.logger.error(
+        `Failed to resume AI for user ${senderJid}: ${error.message}`,
+        error.stack,
+      );
+      throw new HttpException(
+        'Failed to resume AI for this user.',
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }

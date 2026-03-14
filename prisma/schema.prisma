@@ -6,9 +6,11 @@ datasource db {
   provider = "postgresql"
 }
 
-/* ================================
+/**
+ * ================================
  * MODELS
- * ================================ */
+ * ================================
+ */
 
 model User {
   id                  String               @id @default(uuid())
@@ -22,50 +24,53 @@ model User {
 }
 
 model Agent {
-  id                          String                    @id @default(uuid())
-  name                        String
-  prompt                      String?
-  apiKey                      String?                   @unique
-  isActive                    Boolean                   @default(false)
-  isLeadsActive               Boolean                   @default(false)
-  isEmailActive               Boolean                   @default(false)
+  id            String  @id @default(uuid())
+  name          String
+  prompt        String?
+  apiKey        String? @unique
+  isActive      Boolean @default(false)
+  isLeadsActive Boolean @default(false)
+  isEmailActive Boolean @default(false)
 
   // NEW feature flags
-  isVoiceResponseAvailable    Boolean                   @default(false)
-  isImageDataExtraction       Boolean                   @default(false)
+  isVoiceResponseAvailable Boolean @default(false)
+  isImageDataExtraction    Boolean @default(false)
 
-  createdAt                   DateTime                  @default(now())
-  updatedAt                   DateTime                  @updatedAt
-  userId                      String
-  memoryType                  MemoryType                @default(BUFFER)
-  isKnowledgebaseActive       Boolean                   @default(false)
-  isBookingActive             Boolean                   @default(true)
-  claudeModel                 ClaudeModel?
-  geminiModel                 GeminiModel?
-  modelType                   AIModel                   @default(CHATGPT)
-  openAIModel                 OpenAIModel?
-  useOwnApiKey                Boolean                   @default(false)
-  userProvidedApiKey          String?
-  historyLimit                Int                       @default(20)
+  createdAt             DateTime     @default(now())
+  updatedAt             DateTime     @updatedAt
+  userId                String
+  memoryType            MemoryType   @default(BUFFER)
+  isKnowledgebaseActive Boolean      @default(false)
+  isBookingActive       Boolean      @default(true)
+  claudeModel           ClaudeModel?
+  geminiModel           GeminiModel?
+  modelType             AIModel      @default(CHATGPT)
+  openAIModel           OpenAIModel?
+  useOwnApiKey          Boolean      @default(false)
+  userProvidedApiKey    String?
+  historyLimit          Int          @default(20)
 
-  user                        User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  calendarAssignments         AgentCalendarAssignment[]
-  appointments                Appointment[]
-  appointmentLeadItems        AppointmentLeadItem[]
-  bookingSettings             BookingSettings?
-  conversations               Conversation[]
-  Email                       Email[]
-  knowledgeBase               KnowledgeBase?
-  leads                       Lead[]
-  leadItems                   LeadItem[]
-  weeklyAvailabilities        WeeklyAvailability[]
-  whatsapp                    Whatsapp?
+  user                 User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  calendarAssignments  AgentCalendarAssignment[]
+  appointments         Appointment[]
+  appointmentLeadItems AppointmentLeadItem[]
+  bookingSettings      BookingSettings?
+  conversations        Conversation[]
+  Email                Email[]
+  knowledgeBase        KnowledgeBase?
+  leads                Lead[]
+  leadItems            LeadItem[]
+  weeklyAvailabilities WeeklyAvailability[]
+  whatsapp             Whatsapp?
 
   // Agent-owned reusable templates
-  templates                   Template[]
+  templates Template[]
 
   // One Agent -> many OutboundCampaign
-  OutboundCampaign            OutboundCampaign[]
+  OutboundCampaign OutboundCampaign[]
+
+  // Paused conversations for human intervention
+  pausedConversations PausedConversation[]
 
   @@index([userId, isActive])
 }
@@ -95,16 +100,16 @@ model OutboundCampaign {
   updatedAt DateTime               @updatedAt
 
   // Many-to-one: Campaign -> Agent
-  agentId   String
-  agent     Agent                  @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  agentId String
+  agent   Agent  @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
   // Back-relations
-  outboundLeads           OutboundLead[]
-  leadCustomFieldIntakes  leadCustomFieldInatake[]
-  templates               Template[]            // implicit M:N
+  outboundLeads          OutboundLead[]
+  leadCustomFieldIntakes leadCustomFieldInatake[]
+  templates              Template[] // implicit M:N
 
   // 1:1 Broadcast settings for WhatsApp bulk sending
-  broadcast               Broadcast?
+  broadcast Broadcast?
 
   @@index([createdAt])
   @@index([agentId, status, createdAt])
@@ -116,15 +121,15 @@ model OutboundCampaign {
  * Stores optional media binary directly in Postgres.
  */
 model Template {
-  id            String            @id @default(uuid())
-  name          String
-  body          String            @default("Hello world")
+  id   String @id @default(uuid())
+  name String
+  body String @default("Hello world")
 
   /// Variable keys/placeholders like ["firstName","date"]
-  variables     String[]          @default([])
+  variables String[] @default([])
 
   // Single media (stored in Postgres)
-  mediaType     TemplateMediaType @default(NONE)   // NONE, IMAGE, VIDEO, DOCUMENT
+  mediaType     TemplateMediaType @default(NONE) // NONE, IMAGE, VIDEO, DOCUMENT
   mediaData     Bytes?
   mediaMimeType String?
   mediaFileName String?
@@ -133,15 +138,15 @@ model Template {
   mediaHeight   Int?
   mediaChecksum String?
 
-  createdAt     DateTime          @default(now())
-  updatedAt     DateTime          @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   // Ownership
-  agentId       String
-  agent         Agent             @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  agentId String
+  agent   Agent  @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
   // Implicit M:N usage in campaigns (no extra fields)
-  campaigns     OutboundCampaign[]
+  campaigns OutboundCampaign[]
 
   @@unique([agentId, name])
   @@index([agentId, createdAt])
@@ -150,13 +155,13 @@ model Template {
 }
 
 model leadCustomFieldInatake {
-  id                 String           @id @default(uuid())
+  id                 String   @id @default(uuid())
   name               String
   outboundCampaignId String
-  createdAt          DateTime         @default(now())
-  updatedAt          DateTime         @updatedAt
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
 
-  outboundCampaign   OutboundCampaign @relation(fields: [outboundCampaignId], references: [id], onDelete: Cascade)
+  outboundCampaign OutboundCampaign @relation(fields: [outboundCampaignId], references: [id], onDelete: Cascade)
 
   @@unique([outboundCampaignId, name])
   @@index([outboundCampaignId])
@@ -177,7 +182,7 @@ model OutboundLead {
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
 
-  outboundCampaign   OutboundCampaign   @relation(fields: [outboundCampaignId], references: [id], onDelete: Cascade)
+  outboundCampaign OutboundCampaign @relation(fields: [outboundCampaignId], references: [id], onDelete: Cascade)
 
   @@index([createdAt])
   @@index([status])
@@ -186,29 +191,33 @@ model OutboundLead {
   @@map("outbound_leads")
 }
 
-/* ---------------------- Knowledgebase (Pinecone) ---------------------- */
+/**
+ * ---------------------- Knowledgebase (Pinecone) ----------------------
+ */
 /**
  * Each Agent has exactly one KnowledgeBase.
  * Pinecone namespace MUST be the Agent.id (enforced in application code).
  * Defaults align with your .env:
- *   EMBEDDING_MODEL=text-embedding-3-large
- *   EMBEDDING_DIMENSIONS=3072
+ * EMBEDDING_MODEL=text-embedding-3-large
+ * EMBEDDING_DIMENSIONS=3072
  */
 model KnowledgeBase {
-  id                   String                  @id @default(uuid())
-  freeText             String?
-  companyName          String?
-  companyDescription   String?
-  createdAt            DateTime                @default(now())
-  updatedAt            DateTime                @updatedAt
-  agentId              String                  @unique
-  agent                Agent                   @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  id                 String   @id @default(uuid())
+  freeText           String?
+  companyName        String?
+  companyDescription String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  agentId            String   @unique
+  agent              Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
-  /** Default embedding settings for this KB (can be overridden per document if needed) */
-  embeddingModel       String                  @default("text-embedding-3-large")
-  embeddingDimensions  Int                     @default(3072)
+  /**
+   * Default embedding settings for this KB (can be overridden per document if needed)
+   */
+  embeddingModel      String @default("text-embedding-3-large")
+  embeddingDimensions Int    @default(3072)
 
-  documents            KnowledgeBaseDocument[]
+  documents KnowledgeBaseDocument[]
 }
 
 /**
@@ -218,47 +227,59 @@ model KnowledgeBase {
  * - All vectors are upserted to Pinecone under namespace = Agent.id.
  */
 model KnowledgeBaseDocument {
-  id                String                 @id @default(uuid())
-  title             String
-  /** Raw or extracted text (optional for FILE; useful for previews/search fallback) */
-  content           String?
-  tags              String[]               @default([])
+  id      String   @id @default(uuid())
+  title   String
+  /**
+   * Raw or extracted text (optional for FILE; useful for previews/search fallback)
+   */
+  content String?
+  tags    String[] @default([])
 
-  /** Source and lifecycle */
-  sourceType        KnowledgeSourceType    @default(TEXT)
-  status            KnowledgeItemStatus    @default(PROCESSING)
-  deletedAt         DateTime?
+  /**
+   * Source and lifecycle
+   */
+  sourceType KnowledgeSourceType @default(TEXT)
+  status     KnowledgeItemStatus @default(PROCESSING)
+  deletedAt  DateTime?
 
-  /** File metadata (only when sourceType = FILE) */
-  fileName          String?
-  fileExt           String?
-  mimeType          String?
-  fileSize          Int?
-  checksum          String?                // e.g., SHA256 of bytes
-  storagePath       String?                // e.g., S3/local path if you store originals
+  /**
+   * File metadata (only when sourceType = FILE)
+   */
+  fileName    String?
+  fileExt     String?
+  mimeType    String?
+  fileSize    Int?
+  checksum    String? // e.g., SHA256 of bytes
+  storagePath String? // e.g., S3/local path if you store originals
 
-  /** Pinecone mapping */
+  /**
+   * Pinecone mapping
+   */
   // IMPORTANT: vectorNamespace must equal the owning Agent.id (set in code)
-  vectorNamespace   String
-  vectorIdPrefix    String                 @unique // prefix used to create chunk vector IDs
-  vectorCount       Int                    @default(0)
-  lastUpsertedAt    DateTime?
+  vectorNamespace String
+  vectorIdPrefix  String    @unique // prefix used to create chunk vector IDs
+  vectorCount     Int       @default(0)
+  lastUpsertedAt  DateTime?
 
-  /** Chunking/embedding settings (persisted for reproducibility) */
-  embeddingModel    String                 @default("text-embedding-3-large")
-  embeddingDimensions Int                  @default(3072)
-  chunkSize         Int                    @default(800)
-  chunkOverlap      Int                    @default(200)
-  tokenCount        Int?
+  /**
+   * Chunking/embedding settings (persisted for reproducibility)
+   */
+  embeddingModel      String @default("text-embedding-3-large")
+  embeddingDimensions Int    @default(3072)
+  chunkSize           Int    @default(800)
+  chunkOverlap        Int    @default(200)
+  tokenCount          Int?
 
-  /** Extra metadata (original URL, author, etc.) */
-  metadata          Json?
+  /**
+   * Extra metadata (original URL, author, etc.)
+   */
+  metadata Json?
 
-  createdAt         DateTime               @default(now())
-  updatedAt         DateTime               @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  knowledgeBaseId   String
-  knowledgeBase     KnowledgeBase          @relation(fields: [knowledgeBaseId], references: [id], onDelete: Cascade)
+  knowledgeBaseId String
+  knowledgeBase   KnowledgeBase @relation(fields: [knowledgeBaseId], references: [id], onDelete: Cascade)
 
   @@index([knowledgeBaseId, createdAt])
   @@index([sourceType, status, createdAt])
@@ -362,7 +383,7 @@ model Lead {
   id          String     @id @default(uuid())
   status      LeadStatus @default(NEW)
   source      String?
-  senderPhone String?    // WhatsApp phone number of the user who submitted this lead
+  senderPhone String? // WhatsApp phone number of the user who submitted this lead
   data        Json
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
@@ -386,6 +407,25 @@ model Conversation {
   @@index([agentId, senderJid, createdAt])
 }
 
+/**
+ * Tracks users (senderJid) for whom AI responses are paused.
+ * Used for human intervention - when a human operator takes over the conversation.
+ */
+model PausedConversation {
+  id        String   @id @default(uuid())
+  agentId   String
+  senderJid String
+  reason    String? // Optional reason for pausing (e.g., "human intervention")
+  pausedAt  DateTime @default(now())
+  pausedBy  String? // Who paused it (userId or "system")
+
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, senderJid])
+  @@index([agentId, senderJid])
+  @@map("paused_conversations")
+}
+
 model Email {
   id                String      @id @default(uuid())
   recipient         String
@@ -405,41 +445,43 @@ model Email {
 }
 
 model Broadcast {
-  id                   String            @id @default(uuid())
+  id String @id @default(uuid())
 
   // 1:1 to OutboundCampaign
-  outboundCampaignId   String            @unique
-  outboundCampaign     OutboundCampaign  @relation(fields: [outboundCampaignId], references: [id], onDelete: Cascade)
+  outboundCampaignId String           @unique
+  outboundCampaign   OutboundCampaign @relation(fields: [outboundCampaignId], references: [id], onDelete: Cascade)
 
   // Core controls
-  isEnabled            Boolean           @default(false)
-  isPaused             Boolean           @default(false)
-  startAt              DateTime?
+  isEnabled Boolean   @default(false)
+  isPaused  Boolean   @default(false)
+  startAt   DateTime?
 
   // Gap between messages (seconds). Default: 2 minutes.
-  messageGapSeconds    Int               @default(120)
+  messageGapSeconds Int @default(120)
 
   // Template to send (many broadcasts can use same template)
-  selectedTemplateId   String?
+  selectedTemplateId String?
 
   // Progress / metrics
-  totalQueued          Int               @default(0)
-  totalSent            Int               @default(0)
-  totalFailed          Int               @default(0)
+  totalQueued Int @default(0)
+  totalSent   Int @default(0)
+  totalFailed Int @default(0)
 
-  status               BroadcastStatus   @default(DRAFT)
+  status BroadcastStatus @default(DRAFT)
 
-  createdAt            DateTime          @default(now())
-  updatedAt            DateTime          @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([outboundCampaignId])
   @@index([selectedTemplateId])
   @@map("broadcasts")
 }
 
-/* ================================
+/**
+ * ================================
  * BLOG MODELS
- * ================================ */
+ * ================================
+ */
 
 /**
  * Public blogs created by logged-in users.
@@ -447,9 +489,9 @@ model Broadcast {
  * Uses oauthId (Clerk ID) directly for author lookup.
  */
 model Blog {
-  id          String       @id @default(uuid())
-  title       String
-  content     String       @db.Text
+  id      String @id @default(uuid())
+  title   String
+  content String @db.Text
 
   // Image storage (stored in Postgres)
   imageData     Bytes?
@@ -458,23 +500,24 @@ model Blog {
   imageSize     Int?
 
   // View tracking
-  viewCount   Int          @default(0)
+  viewCount Int @default(0)
 
   // Timestamps
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   // Author - stored as Clerk oauthId directly
-  oauthId     String
+  oauthId String
 
   @@index([oauthId, createdAt])
   @@map("blogs")
 }
 
-
-/* ================================
+/**
+ * ================================
  * ENUMS
- * ================================ */
+ * ================================
+ */
 
 enum BlogStatus {
   DRAFT
@@ -605,7 +648,9 @@ enum OutboundCampaignStatus {
   CANCELLED
 }
 
-/** SUPERTSET kept for compatibility */
+/**
+ * SUPERTSET kept for compatibility
+ */
 enum OutboundLeadStatus {
   QUEUED
   NEED_RETRY
@@ -647,7 +692,9 @@ enum RecipientProgressStatus {
   STOPPED
 }
 
-/** WhatsApp template lifecycle (currently unused by Template) */
+/**
+ * WhatsApp template lifecycle (currently unused by Template)
+ */
 enum TemplateStatus {
   DRAFT
   ACTIVE
@@ -670,7 +717,9 @@ enum BroadcastStatus {
   CANCELLED
 }
 
-/** New: Knowledgebase source & status enums */
+/**
+ * New: Knowledgebase source & status enums
+ */
 enum KnowledgeSourceType {
   TEXT
   FILE
