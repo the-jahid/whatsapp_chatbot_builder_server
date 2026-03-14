@@ -5,10 +5,22 @@ import { Logger, ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 
 async function bootstrap() {
-  // Force restart to load env vars
-  // 1. Create the app WITHOUT passing { cors: ... } here.
-  // We will handle CORS manually below.
   const app = await NestFactory.create(AppModule);
+
+  // Forcefully set CORS headers on every request via raw Express middleware.
+  // This runs before NestJS routing and handles proxies that strip CORS headers.
+  app.use((req: any, res: any, next: any) => {
+    const origin = req.headers.origin || '*';
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, Origin, X-Requested-With');
+    if (req.method === 'OPTIONS') {
+      res.status(204).end();
+      return;
+    }
+    next();
+  });
 
   // Swagger/OpenAPI Documentation Setup
   const config = new DocumentBuilder()
